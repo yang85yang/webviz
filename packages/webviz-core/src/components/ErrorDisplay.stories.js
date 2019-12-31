@@ -1,6 +1,6 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
@@ -11,6 +11,7 @@ import moment from "moment";
 import * as React from "react";
 import { withScreenshot } from "storybook-chrome-screenshot";
 
+import { setHooks } from "../loadWebviz";
 import ErrorDisplay, { ErrorList, showErrorModal } from "webviz-core/src/components/ErrorDisplay";
 import reportError from "webviz-core/src/util/reportError";
 
@@ -148,6 +149,45 @@ storiesOf("<ErrorDisplay>", module)
       id: "1",
       message: "Error 1",
       details: "Some error details",
+      read: false,
+      created: new Date(),
+    });
+    return <div />;
+  })
+  .add("Error Modal without details", () => {
+    showErrorModal({
+      id: "1",
+      message: "Error 1",
+      details: null,
+      read: false,
+      created: new Date(),
+    });
+    return <div />;
+  })
+  .add("Error Modal with custom details renderer", () => {
+    setHooks({
+      renderErrorDetails(details) {
+        return <span style={{ fontStyle: "italic" }}>Modified details [{details}]</span>;
+      },
+    });
+    showErrorModal({
+      id: "1",
+      message: "Error Modal without details",
+      details: "original",
+      read: false,
+      created: new Date(),
+    });
+    return <div />;
+  })
+  .add("Error Modal with details in React.Node type", () => {
+    showErrorModal({
+      id: "1",
+      message: "Error 1",
+      details: (
+        <p>
+          This is <b style={{ color: "red" }}>customized</b> error detail.
+        </p>
+      ),
       read: false,
       created: new Date(),
     });

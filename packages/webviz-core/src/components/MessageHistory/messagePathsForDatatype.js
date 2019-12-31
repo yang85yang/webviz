@@ -1,6 +1,6 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
@@ -10,7 +10,7 @@ import { memoize } from "lodash";
 import memoizeWeak from "memoize-weak";
 
 import { type MessagePathStructureItem, type MessagePathStructureItemMessage, isTypicalFilterName } from ".";
-import { type MessagePathPart, rosPrimitives } from "./internalCommon";
+import { type MessagePathPart, rosPrimitives, type RosPrimitive } from "./internalCommon";
 import type { RosDatatypes } from "webviz-core/src/types/RosDatatypes";
 import naturalSort from "webviz-core/src/util/naturalSort";
 
@@ -44,17 +44,21 @@ export function messagePathStructures(datatypes: RosDatatypes): { [string]: Mess
     const structureFor = memoize(
       (datatype: string): MessagePathStructureItemMessage => {
         const nextByName: { [string]: MessagePathStructureItem } = {};
-        const rosMsgFields = datatypes[datatype];
-        if (!rosMsgFields) {
+        const rosDatatype = datatypes[datatype];
+        if (!rosDatatype) {
           throw new Error(`datatype not found: "${datatype}"`);
         }
-        rosMsgFields.forEach((msgField) => {
+        rosDatatype.fields.forEach((msgField) => {
           if (msgField.isConstant) {
             return;
           }
 
           const next = rosPrimitives.includes(msgField.type)
-            ? { structureType: "primitive", primitiveType: msgField.type, datatype }
+            ? {
+                structureType: "primitive",
+                primitiveType: ((msgField.type: any): RosPrimitive), // Flow doesn't understand includes()
+                datatype,
+              }
             : structureFor(msgField.type);
 
           if (msgField.isArray) {
@@ -167,11 +171,18 @@ export const traverseStructure = memoizeWeak(
         }
         structureItem = structureItem.next;
       } else if (msgPathPart.type === "filter") {
-        if (structureItem.structureType !== "message") {
+        if (structureItem.structureType !== "message" || msgPathPart.path.length === 0 || msgPathPart.value == null) {
           return { valid: false, msgPathPart, structureItem };
         }
-        if (!structureItem.nextByName[msgPathPart.name]) {
-          return { valid: false, msgPathPart, structureItem };
+        let currentItem = structureItem;
+        for (const name of msgPathPart.path) {
+          if (currentItem.structureType !== "message") {
+            return { valid: false, msgPathPart, structureItem };
+          }
+          currentItem = currentItem.nextByName[name];
+          if (currentItem == null) {
+            return { valid: false, msgPathPart, structureItem };
+          }
         }
       } else {
         (msgPathPart.type: empty);

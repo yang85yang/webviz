@@ -1,13 +1,12 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
 //  You may not use this file except in compliance with the License.
 
 import { Chart } from "react-chartjs-2";
-
 /* eslint-disable no-underscore-dangle */
 // From https://github.com/chartjs/Chart.js/issues/4895#issuecomment-341874938
 Chart.defaults.multicolorLine = Chart.defaults.scatter;
@@ -31,8 +30,8 @@ Chart.controllers.multicolorLine = Chart.controllers.scatter.extend({
       return !isNaN(data._view.y);
     });
 
-    function setColor(newColor, meta) {
-      meta.dataset._view.borderColor = newColor;
+    function setColor(newColor, { dataset }) {
+      dataset._view.borderColor = newColor;
     }
 
     if (!colors) {

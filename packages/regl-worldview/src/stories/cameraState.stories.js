@@ -12,16 +12,10 @@ import { quat, vec3 } from "gl-matrix";
 import * as React from "react";
 import { withScreenshot } from "storybook-chrome-screenshot";
 
+import { vec4ToOrientation, vec3ToPoint } from "../utils/commandUtils";
 import Container from "./Container";
 
 import { Arrows, Spheres, Axes, Grid, cameraStateSelectors, type CameraState } from "..";
-
-function vec3ToObject([x, y, z]) {
-  return { x, y, z };
-}
-function quatToObject([x, y, z, w]) {
-  return { x, y, z, w };
-}
 
 type Props = {|
   cameraStateFromKnobs: CameraState,
@@ -58,8 +52,8 @@ class CameraStateStory extends React.Component<Props, State> {
 
     const poseArrowMarker = {
       pose: {
-        orientation: quatToObject(cameraState.targetOrientation),
-        position: vec3ToObject(cameraState.target),
+        orientation: vec4ToOrientation(cameraState.targetOrientation),
+        position: vec3ToPoint(cameraState.target),
       },
       scale: { x: 20, y: 3, z: 3 },
       color: { r: 1, g: 0, b: 1, a: 1 },
@@ -86,8 +80,8 @@ class CameraStateStory extends React.Component<Props, State> {
 
     const cameraArrowMarker = {
       pose: {
-        position: vec3ToObject(cameraPosition),
-        orientation: quatToObject(cameraOrientation),
+        position: vec3ToPoint(cameraPosition),
+        orientation: vec4ToOrientation(cameraOrientation),
       },
       scale: { x: arrowLength, y: 2, z: 2 },
       color: { r: 0, g: 1, b: 1, a: 0.5 },
@@ -148,7 +142,7 @@ class CameraStateStory extends React.Component<Props, State> {
   }
 }
 
-const stories = storiesOf("Worldview", module);
+const stories = storiesOf("Worldview/cameraState", module);
 stories
   .addDecorator(withKnobs)
   .addDecorator(withScreenshot())
@@ -231,6 +225,25 @@ stories
       step: 0.1,
     });
 
+    const fovy = number("fovy", Math.PI / 4, {
+      range: true,
+      min: 0,
+      max: Math.PI,
+      step: 0.01,
+    });
+    const near = number("near", 0.01, {
+      range: true,
+      min: 0.001,
+      max: 1000,
+      step: 0.01,
+    });
+    const far = number("far", 5000, {
+      range: true,
+      min: 10,
+      max: 10000,
+      step: 0.01,
+    });
+
     let length = Math.hypot(orientationX, orientationY, orientationZ);
     if (length > 1) {
       length /= 2;
@@ -248,6 +261,9 @@ stories
       target,
       targetOffset,
       targetOrientation,
+      fovy,
+      near,
+      far,
     };
     return <CameraStateStory controlled={controlled} cameraStateFromKnobs={cameraState} />;
   });

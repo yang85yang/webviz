@@ -1,6 +1,6 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
@@ -10,6 +10,11 @@
 // http://wiki.ros.org/rviz/DisplayTypes
 
 import type { Time } from "rosbag";
+
+export type Namespace = {|
+  topic: string,
+  name: string,
+|};
 
 export type Point = {
   x: number,
@@ -36,7 +41,7 @@ export type Orientation = {
   w: number,
 };
 
-type Scale = {
+export type Scale = {
   x: number,
   y: number,
   z: number,
@@ -48,8 +53,6 @@ export type Color = {
   b: number,
   a: number,
 };
-
-type Colors = Color[];
 
 export type Pose = {
   position: Point,
@@ -83,26 +86,25 @@ export type PoseStamped = StampedMessage & {
 
 // Markers
 export type BaseMarker = StampedMessage & {
-  // Need to add hitmapId field to avoid flow errors: https://github.com/facebook/flow/issues/5997
-  hitmapId?: number,
   ns: string,
   id: string,
   action: 0 | 1 | 2 | 3,
   pose: Pose,
   name?: string,
   scale: Scale,
-  color: Color,
+  color?: Color,
+  colors?: Color[],
   lifetime?: Time,
   frameLocked?: boolean, // TODO: Do we need this?
   text?: string,
   meshResource?: {}, // TODO Maybe make this a named resource?
   primitive?: string,
-  customMetadata?: Object,
+  customMetadata?: any,
 };
 
 type MultiPointMarker = {
   points: Points,
-  colors?: Colors,
+  colors?: Color[],
 };
 
 type ArrowSize = {
@@ -134,6 +136,7 @@ export type CylinderMarker = BaseMarker & {
 
 export type LineStripMarker = BaseMarker &
   MultiPointMarker & {
+    closed?: boolean,
     type: 4,
   };
 
@@ -195,6 +198,12 @@ export type FilledPolygonMarker = BaseMarker &
     type: 107,
   };
 
+export type InstancedLineListMarker = BaseMarker &
+  MultiPointMarker & {
+    type: 108,
+    metadataByIndex?: Array<any>,
+  };
+
 export type Marker =
   | ArrowMarker
   | CubeMarker
@@ -209,7 +218,8 @@ export type Marker =
   | TextMarker
   | TriangleListMarker
   | MeshMarker
-  | FilledPolygonMarker;
+  | FilledPolygonMarker
+  | InstancedLineListMarker;
 
 export type MarkerArray = {
   markers: Array<Marker>,
@@ -226,7 +236,7 @@ type PointCloud1 = StampedMessage & {
   type: "PointCloud1",
 };
 
-export type PointCloud2Field = {
+export type PointField = {
   name: string,
   offset: number,
   datatype: number,
@@ -234,7 +244,7 @@ export type PointCloud2Field = {
 };
 
 export type PointCloud2 = StampedMessage & {
-  fields: PointCloud2Field[],
+  fields: PointField[],
   height: number,
   width: number,
   is_bigendian: number, // TODO: Do we need this?

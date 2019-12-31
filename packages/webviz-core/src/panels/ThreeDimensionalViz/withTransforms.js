@@ -1,6 +1,6 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
@@ -11,7 +11,7 @@ import * as React from "react";
 
 import { getGlobalHooks } from "../../loadWebviz";
 import Transforms from "webviz-core/src/panels/ThreeDimensionalViz/Transforms";
-import type { Frame } from "webviz-core/src/types/players";
+import type { Frame } from "webviz-core/src/players/types";
 import { TRANSFORM_TOPIC } from "webviz-core/src/util/globalConstants";
 
 type State = {| transforms: Transforms |};

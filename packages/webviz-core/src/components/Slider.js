@@ -1,6 +1,6 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
@@ -146,7 +146,7 @@ export default class Slider extends React.Component<Props> {
     }
 
     return (
-      <StyledSlider innerRef={(el) => (this.el = el)} onClick={this._onClick} onMouseDown={this._onMouseDown}>
+      <StyledSlider ref={(el) => (this.el = el)} onClick={this._onClick} onMouseDown={this._onMouseDown}>
         <DocumentEvents
           target={window}
           enabled={mouseDown && draggable}
@@ -155,7 +155,7 @@ export default class Slider extends React.Component<Props> {
         />
         {/* include mouseup on window.top for storybook */}
         <DocumentEvents target={window.top} enabled={mouseDown && draggable} onMouseUp={this._onMouseUp} />
-        {renderSlider(value != null ? (value - min) / (max - min) : undefined)}
+        {renderSlider(value != null && min !== max ? (value - min) / (max - min) : undefined)}
       </StyledSlider>
     );
   }

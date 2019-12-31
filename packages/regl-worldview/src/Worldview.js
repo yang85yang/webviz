@@ -12,7 +12,17 @@ import * as React from "react";
 import ContainerDimensions from "react-container-dimensions";
 
 import { CameraListener, DEFAULT_CAMERA_STATE } from "./camera/index";
-import type { MouseHandler, Dimensions, Vec4, CameraState, CameraKeyMap, MouseEventEnum } from "./types";
+import Command from "./commands/Command";
+import type {
+  MouseHandler,
+  Dimensions,
+  Vec4,
+  CameraState,
+  CameraKeyMap,
+  MouseEventEnum,
+  MouseEventObject,
+} from "./types";
+import aggregate from "./utils/aggregate";
 import { getNodeEnv } from "./utils/common";
 import { Ray } from "./utils/Raycast";
 import { WorldviewContext } from "./WorldviewContext";
@@ -20,6 +30,7 @@ import WorldviewReactContext from "./WorldviewReactContext";
 
 const DEFAULT_BACKGROUND_COLOR = [0, 0, 0, 1];
 export const DEFAULT_MOUSE_CLICK_RADIUS = 3;
+const DEFAULT_MAX_NUMBER_OF_HITMAP_LAYERS = 100;
 
 export type BaseProps = {|
   keyMap?: CameraKeyMap,
@@ -27,13 +38,17 @@ export type BaseProps = {|
   backgroundColor?: Vec4,
   // rendering the hitmap on mouse move is expensive, so disable it by default
   hitmapOnMouseMove?: boolean,
+  // getting events for objects stacked on top of each other is expensive, so disable it by default
+  enableStackedObjectEvents?: boolean,
+  // allow users to specify the max stacked object count
+  maxStackedObjectCount: number,
   showDebug?: boolean,
   children?: React.Node,
   style: { [styleAttribute: string]: number | string },
 
-  cameraState?: CameraState,
+  cameraState?: $Shape<CameraState>,
   onCameraStateChange?: (CameraState) => void,
-  defaultCameraState?: CameraState,
+  defaultCameraState?: $Shape<CameraState>,
   // interactions
   onDoubleClick?: MouseHandler,
   onMouseDown?: MouseHandler,
@@ -47,17 +62,13 @@ type State = {|
   worldviewContext: WorldviewContext,
 |};
 
-function handleWorldviewMouseInteraction(rawObjectId: number, ray: Ray, e: MouseEvent, handler: MouseHandler) {
-  const objectId = rawObjectId !== 0 ? rawObjectId : undefined;
-  // TODO: deprecating, remove before 1.x release
-  const args = {
-    ray,
-    objectId,
-    get clickedObjectId() {
-      console.warn('"clickedObjectId" is deprecated. Please use "objectId" instead.');
-      return objectId;
-    },
-  };
+function handleWorldviewMouseInteraction(
+  objects: MouseEventObject[],
+  ray: Ray,
+  e: SyntheticMouseEvent<HTMLCanvasElement>,
+  handler: MouseHandler
+) {
+  const args = { ray, objects };
 
   try {
     handler(e, args);
@@ -74,6 +85,7 @@ export class WorldviewBase extends React.Component<BaseProps, State> {
   _dragStartPos: ?{ x: number, y: number } = null;
 
   static defaultProps = {
+    maxStackedObjectCount: DEFAULT_MAX_NUMBER_OF_HITMAP_LAYERS,
     backgroundColor: DEFAULT_BACKGROUND_COLOR,
     shiftKeys: true,
     style: {},
@@ -146,25 +158,35 @@ export class WorldviewBase extends React.Component<BaseProps, State> {
     if (!this._tick) {
       this._tick = requestAnimationFrame(() => {
         this._tick = undefined;
-        worldviewContext.paint();
+        try {
+          worldviewContext.paint();
+        } catch (error) {
+          // Regl automatically tries to reconnect when losing the canvas 3d context.
+          // We should log this error, but it's not important to throw it.
+          if (error.message === "(regl) context lost") {
+            console.warn(error);
+          } else {
+            throw error;
+          }
+        }
       });
     }
   }
 
-  _onDoubleClick = (e: MouseEvent) => {
+  _onDoubleClick = (e: SyntheticMouseEvent<HTMLCanvasElement>) => {
     this._onMouseInteraction(e, "onDoubleClick");
   };
 
-  _onMouseDown = (e: MouseEvent) => {
+  _onMouseDown = (e: SyntheticMouseEvent<HTMLCanvasElement>) => {
     this._dragStartPos = { x: e.clientX, y: e.clientY };
     this._onMouseInteraction(e, "onMouseDown");
   };
 
-  _onMouseMove = (e: MouseEvent) => {
-    this._onMouseInteraction(e, "onMouseMove", this.props.hitmapOnMouseMove);
+  _onMouseMove = (e: SyntheticMouseEvent<HTMLCanvasElement>) => {
+    this._onMouseInteraction(e, "onMouseMove");
   };
 
-  _onMouseUp = (e: MouseEvent) => {
+  _onMouseUp = (e: SyntheticMouseEvent<HTMLCanvasElement>) => {
     this._onMouseInteraction(e, "onMouseUp");
     const { _dragStartPos } = this;
     if (_dragStartPos) {
@@ -178,7 +200,7 @@ export class WorldviewBase extends React.Component<BaseProps, State> {
     }
   };
 
-  _onMouseInteraction = (e: MouseEvent, mouseEventName: MouseEventEnum, readHitmap: boolean = true) => {
+  _onMouseInteraction = (e: SyntheticMouseEvent<HTMLCanvasElement>, mouseEventName: MouseEventEnum) => {
     const { worldviewContext } = this.state;
     const worldviewHandler = this.props[mouseEventName];
 
@@ -196,19 +218,30 @@ export class WorldviewBase extends React.Component<BaseProps, State> {
       return;
     }
 
-    if (!readHitmap && worldviewHandler) {
-      return handleWorldviewMouseInteraction(0, ray, e, worldviewHandler);
+    // rendering the hitmap on mouse move is expensive, so disable it by default
+    if (mouseEventName === "onMouseMove" && !this.props.hitmapOnMouseMove) {
+      if (worldviewHandler) {
+        return handleWorldviewMouseInteraction([], ray, e, worldviewHandler);
+      }
+      return;
     }
 
     // reading hitmap is async so we need to persist the event to use later in the event handler
     (e: any).persist();
     worldviewContext
-      .readHitmap(canvasX, canvasY)
-      .then((objectId) => {
-        if (worldviewHandler) {
-          handleWorldviewMouseInteraction(objectId, ray, e, worldviewHandler);
+      .readHitmap(canvasX, canvasY, !!this.props.enableStackedObjectEvents, this.props.maxStackedObjectCount)
+      .then((mouseEventsWithCommands) => {
+        const mouseEventsByCommand: Map<Command, Array<MouseEventObject>> = aggregate(mouseEventsWithCommands);
+        for (const [command, mouseEvents] of mouseEventsByCommand.entries()) {
+          command.handleMouseEvent(mouseEvents, ray, e, mouseEventName);
+          if (e.isPropagationStopped()) {
+            break;
+          }
         }
-        worldviewContext.callComponentHandlers(objectId, ray, e, mouseEventName);
+        if (worldviewHandler && !e.isPropagationStopped()) {
+          const mouseEvents = mouseEventsWithCommands.map(([mouseEventObject]) => mouseEventObject);
+          handleWorldviewMouseInteraction(mouseEvents, ray, e, worldviewHandler);
+        }
       })
       .catch((e) => {
         console.error(e);

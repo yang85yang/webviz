@@ -1,6 +1,6 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
@@ -11,9 +11,11 @@ import CheckboxMarkedIcon from "@mdi/svg/svg/checkbox-marked.svg";
 import MenuDownIcon from "@mdi/svg/svg/menu-down.svg";
 import WavesIcon from "@mdi/svg/svg/waves.svg";
 import cx from "classnames";
-import { sortBy, pick, get } from "lodash";
+import { sortBy, last, get } from "lodash";
 import * as React from "react";
+import { hot } from "react-hot-loader/root";
 import { createSelector } from "reselect";
+import type { Time } from "rosbag";
 import styled from "styled-components";
 
 import ImageCanvas from "./ImageCanvas";
@@ -28,23 +30,23 @@ import EmptyState from "webviz-core/src/components/EmptyState";
 import Flex from "webviz-core/src/components/Flex";
 import Icon from "webviz-core/src/components/Icon";
 import { Item, SubMenu } from "webviz-core/src/components/Menu";
-import MessageHistory, {
-  type MessageHistoryData,
-  type MessageHistoryItemsByPath,
-} from "webviz-core/src/components/MessageHistory";
-import synchronizeMessages from "webviz-core/src/components/MessageHistory/synchronizeMessages";
+import { useShallowMemo, useDeepMemo } from "webviz-core/src/components/MessageHistory/hooks";
+import { getSynchronizingReducers } from "webviz-core/src/components/MessageHistory/synchronizeMessages";
 import Panel from "webviz-core/src/components/Panel";
 import PanelToolbar from "webviz-core/src/components/PanelToolbar";
+import filterMap from "webviz-core/src/filterMap";
 import { getGlobalHooks } from "webviz-core/src/loadWebviz";
+import * as PanelAPI from "webviz-core/src/PanelAPI";
+import type { Topic, Message, TypedMessage } from "webviz-core/src/players/types";
 import inScreenshotTests from "webviz-core/src/stories/inScreenshotTests";
 import colors from "webviz-core/src/styles/colors.module.scss";
-import type { Topic } from "webviz-core/src/types/players";
+import type { CameraInfo } from "webviz-core/src/types/Messages";
+import type { SaveConfig } from "webviz-core/src/types/panels";
 import naturalSort from "webviz-core/src/util/naturalSort";
 import { formatTimeRaw } from "webviz-core/src/util/time";
 import toggle from "webviz-core/src/util/toggle";
 
-const IMAGE_QUEUE_SIZE = 3;
-const MARKER_QUEUE_SIZE = 12;
+const { useMemo, useCallback } = React;
 
 export type ImageViewPanelHooks = {
   defaultConfig: {
@@ -53,35 +55,29 @@ export type ImageViewPanelHooks = {
     scale: number,
     synchronize: boolean,
   },
-  imageMarkerArrayDatatypes: string[],
   imageMarkerDatatypes: string[],
+  imageMarkerArrayDatatypes: string[],
 };
 
-export type Config = {
+export type Config = {|
   cameraTopic: string,
   enabledMarkerNames: string[],
   scale: number,
   panelHooks?: ImageViewPanelHooks,
   transformMarkers: boolean,
   synchronize: boolean,
-};
+  mode: "fit" | "fill" | "other" | null,
+  zoomPercentage: ?number,
+  offset: ?(number[]),
+  saveStoryConfig?: () => void,
+|};
 
-export type SaveConfig = ($Shape<Config>) => void;
+export type SaveImagePanelConfig = SaveConfig<Config>;
 
 type Props = {
   config: Config,
-  saveConfig: SaveConfig,
+  saveConfig: SaveImagePanelConfig,
   topics: Topic[],
-};
-
-const formatTimeForPath = (items: MessageHistoryItemsByPath, path: string): string => {
-  const stamp = get(items, [path, "0", "message", "message", "header", "stamp"]);
-
-  if (stamp === undefined) {
-    return "";
-  }
-
-  return formatTimeRaw(stamp);
 };
 
 const TopicTimestampSpan = styled.span`
@@ -90,8 +86,8 @@ const TopicTimestampSpan = styled.span`
   font-style: italic;
 `;
 
-const TopicTimestamp = ({ text, style }: { text: string, style?: { [string]: string } }) =>
-  text === "" ? null : <TopicTimestampSpan style={style}>{text}</TopicTimestampSpan>;
+const TopicTimestamp = ({ text, style: styleObj }: { text: string, style?: { [string]: string } }) =>
+  text === "" ? null : <TopicTimestampSpan style={styleObj}>{text}</TopicTimestampSpan>;
 
 const BottomBar = ({ children, containsOpen }: { children?: React.Node, containsOpen: boolean }) => (
   <div
@@ -102,9 +98,17 @@ const BottomBar = ({ children, containsOpen }: { children?: React.Node, contains
   </div>
 );
 
-const ToggleComponent = ({ text, disabled = false }: { text: string, disabled?: boolean }) => {
+const ToggleComponent = ({
+  text,
+  disabled = false,
+  dataTest,
+}: {
+  text: string,
+  disabled?: boolean,
+  dataTest?: string,
+}) => {
   return (
-    <button style={{ maxWidth: "100%", padding: "4px 8px" }} className={cx({ disabled })}>
+    <button style={{ maxWidth: "100%", padding: "4px 8px" }} className={cx({ disabled })} data-test={dataTest}>
       <span className={dropDownStyles.title}>{text}</span>
       <Icon style={{ marginLeft: 4 }}>
         <MenuDownIcon style={{ width: 14, height: 14, opacity: 0.5 }} />
@@ -115,8 +119,8 @@ const ToggleComponent = ({ text, disabled = false }: { text: string, disabled?: 
 
 // Group image topics by the first component of their name
 const imageTopicsByNamespaceSelector = createSelector(
-  (topics?: Topic[]) => topics || [],
-  (topics: Topic[]): Map<string, Topic[]> => {
+  (topics?: $ReadOnlyArray<Topic>) => topics || [],
+  (topics: $ReadOnlyArray<Topic>): Map<string, Topic[]> => {
     const imageTopics = topics.filter(
       (topic) => topic.datatype === "sensor_msgs/Image" || topic.datatype === "sensor_msgs/CompressedImage"
     );
@@ -125,8 +129,8 @@ const imageTopicsByNamespaceSelector = createSelector(
 );
 
 const markerTopicSelector = createSelector(
-  (topics?: Topic[]) => topics || [],
-  (topics: Topic[], imageViewHooksProp: ?ImageViewPanelHooks): Topic[] => {
+  (topics?: $ReadOnlyArray<Topic>) => topics || [],
+  (topics: $ReadOnlyArray<Topic>, imageViewHooksProp: ?ImageViewPanelHooks): Topic[] => {
     const imageViewHooks = imageViewHooksProp || getGlobalHooks().perPanelHooks().ImageView;
     const markerTopics = topics.filter((topic) =>
       imageViewHooks.imageMarkerDatatypes.concat(imageViewHooks.imageMarkerArrayDatatypes).includes(topic.datatype)
@@ -135,7 +139,12 @@ const markerTopicSelector = createSelector(
   }
 );
 
-function renderEmptyState(cameraTopic: string, markerTopics: string[], shouldSynchronize: boolean) {
+function renderEmptyState(
+  cameraTopic: string,
+  markerTopics: string[],
+  shouldSynchronize: boolean,
+  messagesByTopic: { [topic: string]: Message[] }
+) {
   return (
     <EmptyState>
       Waiting for images {markerTopics.length > 0 && "and markers"} on:
@@ -150,61 +159,129 @@ function renderEmptyState(cameraTopic: string, markerTopics: string[], shouldSyn
         ))}
       </ul>
       {shouldSynchronize && (
-        <p>
-          Synchronization is enabled, so all <code>header.stamp</code>s must match exactly.
-        </p>
+        <>
+          <p>
+            Synchronization is enabled, so all <code>header.stamp</code>s must match exactly.
+          </p>
+          <ul>
+            {Object.keys(messagesByTopic).map((topic) => (
+              <li key={topic}>
+                <code>{topic}</code>:{" "}
+                {messagesByTopic[topic] && messagesByTopic[topic].length
+                  ? messagesByTopic[topic].map(({ message }) => formatTimeRaw(message.header.stamp)).join(", ")
+                  : "no messages"}
+              </li>
+            ))}
+          </ul>
+        </>
       )}
     </EmptyState>
   );
 }
 
-class ImageView extends React.Component<Props> {
-  static panelType = "ImageViewPanel";
-  static defaultConfig = getGlobalHooks().perPanelHooks().ImageView.defaultConfig;
+function useOptionallySynchronizedMessages(
+  shouldSynchronize: boolean,
+  topics: $ReadOnlyArray<PanelAPI.RequestedTopic>
+) {
+  const memoizedTopics = useDeepMemo(topics);
+  const reducers = useMemo(
+    () =>
+      shouldSynchronize
+        ? getSynchronizingReducers(
+            memoizedTopics.map((request) => (typeof request === "string" ? request : request.topic))
+          )
+        : {
+            restore: (previousValue) => ({
+              messagesByTopic: previousValue ? previousValue.messagesByTopic : {},
+              synchronizedMessages: null,
+            }),
+            addMessage: ({ messagesByTopic, synchronizedMessages }, newMessage) => ({
+              messagesByTopic: { ...messagesByTopic, [newMessage.topic]: [newMessage] },
+              synchronizedMessages: null,
+            }),
+          },
+    [shouldSynchronize, memoizedTopics]
+  );
+  return PanelAPI.useMessages({
+    topics,
+    ...reducers,
+  }).reducedValue;
+}
 
-  onToggleMarkerName = (markerName: string) => {
-    this.props.saveConfig({ enabledMarkerNames: toggle(this.props.config.enabledMarkerNames, markerName) });
-  };
+function ImageView(props: Props) {
+  const { config, saveConfig } = props;
+  const { scale, synchronize, cameraTopic, enabledMarkerNames, panelHooks, transformMarkers } = config;
+  const { topics } = PanelAPI.useDataSourceInfo();
 
-  onChangeTopic = (cameraTopic: string) => {
-    this.props.saveConfig({
-      cameraTopic,
-      transformMarkers: getGlobalHooks()
-        .perPanelHooks()
-        .ImageView.canTransformMarkersByTopic(cameraTopic),
-    });
-  };
+  const onToggleMarkerName = useCallback(
+    (markerName: string) => {
+      saveConfig({ enabledMarkerNames: toggle(enabledMarkerNames, markerName) });
+    },
+    [saveConfig, enabledMarkerNames]
+  );
 
-  onChangeScale = (scale: number) => {
-    this.props.saveConfig({ scale });
-  };
+  const onChangeTopic = useCallback(
+    (newCameraTopic: string) => {
+      saveConfig({
+        cameraTopic: newCameraTopic,
+        transformMarkers: getGlobalHooks()
+          .perPanelHooks()
+          .ImageView.canTransformMarkersByTopic(newCameraTopic),
+      });
+    },
+    [saveConfig]
+  );
 
-  renderImageTopicDropdown(allItemsByPath: MessageHistoryItemsByPath) {
-    const { cameraTopic } = this.props.config;
+  const onChangeScale = useCallback(
+    (newScale: number) => {
+      saveConfig({ scale: newScale });
+    },
+    [saveConfig]
+  );
+
+  const onToggleSynchronize = useCallback(
+    () => {
+      saveConfig({ synchronize: !config.synchronize });
+    },
+    [saveConfig, config.synchronize]
+  );
+
+  const renderImageTopicDropdown = () => {
     const cameraNamespace = getCameraNamespace(cameraTopic);
-    const imageTopicsByNamespace = imageTopicsByNamespaceSelector(this.props.topics);
+    const imageTopicsByNamespace = imageTopicsByNamespaceSelector(topics);
 
     if (!imageTopicsByNamespace || imageTopicsByNamespace.size === 0) {
-      return <Dropdown toggleComponent={<ToggleComponent text={cameraTopic || "no image topics yet"} disabled />} />;
+      return (
+        <Dropdown
+          toggleComponent={
+            <ToggleComponent dataTest={"topics-dropdown"} text={cameraTopic || "no image topics yet"} disabled />
+          }
+        />
+      );
     }
 
     const items = [...imageTopicsByNamespace.keys()].sort().map((group) => {
-      const topics = imageTopicsByNamespace.get(group);
-      if (!topics) {
+      const imageTopics = imageTopicsByNamespace.get(group);
+      if (!imageTopics) {
         return null;
       } // satisfy flow
-      topics.sort(naturalSort("name"));
+      imageTopics.sort(naturalSort("name"));
 
-      // place rectified topic above other topics
+      // place rectified topic above other imageTopics
       return (
-        <SubMenu direction="right" key={group} text={group} checked={group === cameraNamespace}>
-          {topics.map((topic) => {
+        <SubMenu
+          direction="right"
+          key={group}
+          text={group}
+          checked={group === cameraNamespace}
+          dataTest={group.substr(1)}>
+          {imageTopics.map((topic) => {
             return (
               <Item
                 key={topic.name}
                 value={topic.name}
                 checked={topic.name === cameraTopic}
-                onClick={() => this.onChangeTopic(topic.name)}>
+                onClick={() => onChangeTopic(topic.name)}>
                 {topic.name}
               </Item>
             );
@@ -212,180 +289,190 @@ class ImageView extends React.Component<Props> {
         </SubMenu>
       );
     });
-    return <Dropdown toggleComponent={<ToggleComponent text={cameraTopic} />}>{items}</Dropdown>;
-  }
+    return (
+      <Dropdown toggleComponent={<ToggleComponent dataTest={"topics-dropdown"} text={cameraTopic} />}>{items}</Dropdown>
+    );
+  };
 
-  renderMarkerDropdown(allItemsByPath: MessageHistoryItemsByPath) {
-    const { cameraTopic, enabledMarkerNames } = this.props.config;
-    const imageTopicsByNamespace = imageTopicsByNamespaceSelector(this.props.topics);
-    const markerTopics = markerTopicSelector(this.props.topics, this.props.config.panelHooks);
+  const renderMarkerDropdown = (cameraInfo: ?CameraInfo, renderedMarkerTimestamps: { [topic: string]: Time }) => {
+    const imageTopicsByNamespace = imageTopicsByNamespaceSelector(topics);
+    const markerTopics = markerTopicSelector(topics, panelHooks);
 
     const allCameraNamespaces = imageTopicsByNamespace ? [...imageTopicsByNamespace.keys()] : [];
     const markerOptions = getMarkerOptions(cameraTopic, (markerTopics || []).map((t) => t.name), allCameraNamespaces);
+
+    const missingRequiredCameraInfo = scale !== 1 && !cameraInfo;
+
     return (
       <Dropdown
         dataTest={"markers-dropdown"}
         closeOnChange={false}
-        onChange={this.onToggleMarkerName}
+        onChange={onToggleMarkerName}
         value={enabledMarkerNames}
         text={markerOptions.length > 0 ? "markers" : "no markers"}
-        tooltip={markerOptions.length === 0 ? "camera_info must be available to render markers" : undefined}
-        disabled={markerOptions.length === 0}>
+        tooltip={
+          missingRequiredCameraInfo
+            ? "camera_info is required when image resolution is set to less than 100%.\nResolution can be changed in the panel settings."
+            : undefined
+        }
+        disabled={markerOptions.length === 0 || missingRequiredCameraInfo}>
         {markerOptions.map((option) => (
           <Item
             icon={enabledMarkerNames.includes(option.name) ? <CheckboxMarkedIcon /> : <CheckboxBlankOutlineIcon />}
             key={option.name}
             value={option.name}>
-            <span>{option.name}</span>
-            <TopicTimestamp text={formatTimeForPath(allItemsByPath, option.topic)} />
+            <span>{option.topic}</span>
+            <TopicTimestamp
+              text={renderedMarkerTimestamps[option.topic] ? formatTimeRaw(renderedMarkerTimestamps[option.topic]) : ""}
+            />
           </Item>
         ))}
       </Dropdown>
     );
-  }
-
-  _renderToolbar(allItemsByPath: MessageHistoryItemsByPath) {
-    return (
-      <PanelToolbar floating helpContent={helpContent} menuContent={this._renderMenuContent()}>
-        <div className={style.controls}>
-          {this.renderImageTopicDropdown(allItemsByPath)}
-          {this.renderMarkerDropdown(allItemsByPath)}
-        </div>
-      </PanelToolbar>
-    );
-  }
-
-  _toggleSynchronize = () => {
-    this.props.saveConfig({ synchronize: !this.props.config.synchronize });
   };
 
-  _renderMenuContent() {
-    const { scale, synchronize } = this.props.config;
-    return (
+  const menuContent = useMemo(
+    () => (
       <>
-        <Item
-          icon={synchronize ? <CheckboxMarkedIcon /> : <CheckboxBlankOutlineIcon />}
-          onClick={this._toggleSynchronize}
-          tooltip={`Image queue size: ${IMAGE_QUEUE_SIZE}\nMarker queue size: ${MARKER_QUEUE_SIZE}`}>
+        <Item icon={synchronize ? <CheckboxMarkedIcon /> : <CheckboxBlankOutlineIcon />} onClick={onToggleSynchronize}>
           <span>Synchronize images and markers</span>
         </Item>
         <hr />
         <SubMenu direction="right" text={`Image resolution: ${(scale * 100).toFixed()}%`}>
           {[0.2, 0.5, 1].map((value) => {
             return (
-              <Item key={value} value={value} checked={scale === value} onClick={() => this.onChangeScale(value)}>
+              <Item key={value} value={value} checked={scale === value} onClick={() => onChangeScale(value)}>
                 {(value * 100).toFixed()}%
               </Item>
             );
           })}
         </SubMenu>
       </>
-    );
-  }
+    ),
+    [scale, onChangeScale, synchronize, onToggleSynchronize]
+  );
 
-  render() {
-    const {
-      saveConfig,
-      config,
-      config: { cameraTopic, enabledMarkerNames, scale, panelHooks, transformMarkers },
-    } = this.props;
+  const cameraInfoTopic = getCameraInfoTopic(cameraTopic);
+  const cameraInfo: ?CameraInfo = PanelAPI.useMessages({
+    topics: cameraInfoTopic ? [cameraInfoTopic] : [],
+    restore: useCallback((value) => value, []),
+    addMessage: useCallback((value, { message }: TypedMessage<CameraInfo>) => message, []),
+  }).reducedValue;
 
-    const cameraInfoTopic = getCameraInfoTopic(cameraTopic);
-    const allMarkerTopics = markerTopicSelector(this.props.topics, this.props.config.panelHooks);
-    const markerTopics = getMarkerTopics(cameraTopic, enabledMarkerNames).filter((markerTopic) =>
+  const allMarkerTopics = markerTopicSelector(topics, panelHooks);
+  const markerTopics = useShallowMemo(
+    getMarkerTopics(cameraTopic, enabledMarkerNames).filter((markerTopic) =>
       allMarkerTopics.some(({ name }) => markerTopic === name)
-    );
+    )
+  );
 
-    const shouldSynchronize = config.synchronize && markerTopics.length > 0;
+  const shouldSynchronize = config.synchronize && markerTopics.length > 0;
+  const imageAndMarkerTopics = useShallowMemo([{ topic: cameraTopic, imageScale: scale }, ...markerTopics]);
+  const { messagesByTopic, synchronizedMessages } = useOptionallySynchronizedMessages(
+    shouldSynchronize,
+    imageAndMarkerTopics
+  );
+  const imageMessage = get(messagesByTopic, [cameraTopic, 0]);
 
-    // When synchronizing, keep some extra historical messages so we can synchronize over
-    // significant time delays.
-    const imageHistorySize = shouldSynchronize ? IMAGE_QUEUE_SIZE : 1;
-    const markerHistorySize = shouldSynchronize ? MARKER_QUEUE_SIZE : 1;
+  const markersToRender: Message[] = useMemo(
+    () =>
+      shouldSynchronize
+        ? synchronizedMessages
+          ? markerTopics.map((topic) => synchronizedMessages[topic])
+          : []
+        : filterMap(markerTopics, (topic) => last(messagesByTopic[topic])),
+    [markerTopics, messagesByTopic, shouldSynchronize, synchronizedMessages]
+  );
+  // Timestamps are displayed for informational purposes in the markers menu
+  const renderedMarkerTimestamps = useMemo(
+    () => {
+      const stamps = {};
+      for (const { topic, message } of markersToRender) {
+        stamps[topic] = message.header.stamp;
+      }
+      return stamps;
+    },
+    [markersToRender]
+  );
 
+  const rawMarkerData = {
+    markers: markersToRender,
+    scale,
+    transformMarkers,
+    cameraInfo: markersToRender.length > 0 ? cameraInfo : null,
+  };
+
+  const renderToolbar = () => {
     return (
-      <Flex col>
-        <MessageHistory paths={[cameraTopic]} imageScale={scale} historySize={imageHistorySize}>
-          {({ itemsByPath: imageItemsByPath }: MessageHistoryData) => (
-            <MessageHistory
-              paths={markerTopics.concat(cameraInfoTopic ? [cameraInfoTopic] : [])}
-              historySize={markerHistorySize}>
-              {({ itemsByPath: markerItemsByPath }: MessageHistoryData) => {
-                const allItemsByPath: ?MessageHistoryItemsByPath = (() => {
-                  const items = {
-                    ...imageItemsByPath,
-                    ...pick(markerItemsByPath, markerTopics),
-                  };
-                  return shouldSynchronize ? synchronizeMessages(items) : items;
-                })();
+      <PanelToolbar floating helpContent={helpContent} menuContent={menuContent}>
+        <div className={style.controls}>
+          {renderImageTopicDropdown()}
+          {renderMarkerDropdown(cameraInfo, renderedMarkerTimestamps)}
+        </div>
+      </PanelToolbar>
+    );
+  };
 
-                if (!allItemsByPath || allItemsByPath[cameraTopic].length === 0) {
-                  return (
-                    <>
-                      {this._renderToolbar({})}
-                      {renderEmptyState(cameraTopic, markerTopics, shouldSynchronize)}
-                    </>
-                  );
-                }
-
-                return (
-                  <>
-                    {this._renderToolbar(allItemsByPath)}
-                    <ImageCanvas
-                      transformMarkers={!!transformMarkers}
-                      saveConfig={saveConfig}
-                      panelHooks={panelHooks}
-                      topic={cameraTopic}
-                      image={allItemsByPath[cameraTopic][0] && allItemsByPath[cameraTopic][0].message}
-                      cameraInfo={
-                        cameraInfoTopic ? get(markerItemsByPath, [cameraInfoTopic, 0, "message", "message"]) : undefined
-                      }
-                      markers={markerTopics.map((topic) => get(allItemsByPath[topic], [0, "message"])).filter(Boolean)}
-                    />
-                    <ChildToggle.ContainsOpen>
-                      {(containsOpen) => {
-                        const canTransformMarkers = getGlobalHooks()
-                          .perPanelHooks()
-                          .ImageView.canTransformMarkersByTopic(cameraTopic);
-
-                        const topicTimestamp = (
-                          <TopicTimestamp
-                            style={{ padding: "8px 8px 0px 0px" }}
-                            text={formatTimeForPath(allItemsByPath, cameraTopic)}
-                          />
-                        );
-
-                        if (!canTransformMarkers) {
-                          return <BottomBar containsOpen={containsOpen}>{topicTimestamp}</BottomBar>;
-                        }
-
-                        return (
-                          <BottomBar containsOpen={containsOpen}>
-                            {topicTimestamp}
-                            <Icon
-                              onClick={() => saveConfig({ transformMarkers: !transformMarkers })}
-                              tooltip={
-                                transformMarkers
-                                  ? "Markers are being transformed by webviz based on the camera model. Click to turn it off."
-                                  : `Markers can be transformed by webviz based on the camera model. Click to turn it on.`
-                              }
-                              fade
-                              medium>
-                              <WavesIcon style={{ color: transformMarkers ? colors.orange : colors.textBright }} />
-                            </Icon>
-                          </BottomBar>
-                        );
-                      }}
-                    </ChildToggle.ContainsOpen>
-                  </>
-                );
-              }}
-            </MessageHistory>
-          )}
-        </MessageHistory>
+  if (!imageMessage || (shouldSynchronize && !synchronizedMessages)) {
+    return (
+      <Flex col clip>
+        {renderToolbar()}
+        {renderEmptyState(cameraTopic, markerTopics, shouldSynchronize, messagesByTopic)}
       </Flex>
     );
   }
+
+  return (
+    <Flex col clip>
+      {renderToolbar()}
+      <ImageCanvas
+        panelHooks={panelHooks}
+        topic={cameraTopic}
+        image={imageMessage}
+        rawMarkerData={rawMarkerData}
+        config={config}
+        saveConfig={saveConfig}
+      />
+      <ChildToggle.ContainsOpen>
+        {(containsOpen) => {
+          const canTransformMarkers = getGlobalHooks()
+            .perPanelHooks()
+            .ImageView.canTransformMarkersByTopic(cameraTopic);
+
+          const topicTimestamp = (
+            <TopicTimestamp
+              style={{ padding: "8px 8px 0px 0px" }}
+              text={imageMessage ? formatTimeRaw(imageMessage.message.header.stamp) : ""}
+            />
+          );
+
+          if (!canTransformMarkers) {
+            return <BottomBar containsOpen={containsOpen}>{topicTimestamp}</BottomBar>;
+          }
+
+          return (
+            <BottomBar containsOpen={containsOpen}>
+              {topicTimestamp}
+              <Icon
+                onClick={() => saveConfig({ transformMarkers: !transformMarkers })}
+                tooltip={
+                  transformMarkers
+                    ? "Markers are being transformed by webviz based on the camera model. Click to turn it off."
+                    : `Markers can be transformed by webviz based on the camera model. Click to turn it on.`
+                }
+                fade
+                medium>
+                <WavesIcon style={{ color: transformMarkers ? colors.orange : colors.textBright }} />
+              </Icon>
+            </BottomBar>
+          );
+        }}
+      </ChildToggle.ContainsOpen>
+    </Flex>
+  );
 }
 
-export default Panel<Config>(ImageView);
+ImageView.panelType = "ImageViewPanel";
+ImageView.defaultConfig = getGlobalHooks().perPanelHooks().ImageView.defaultConfig;
+
+export default hot(Panel<Config>(ImageView));

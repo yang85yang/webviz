@@ -1,6 +1,6 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
@@ -93,7 +93,9 @@ describe("time.formatTimeRaw", () => {
   });
 
   it("does not format negative times", () => {
+    jest.spyOn(console, "error").mockReturnValue();
     expect(time.formatTimeRaw({ sec: -1, nsec: 0 })).toEqual("(invalid negative time)");
+    expect(console.error).toHaveBeenCalled();
   });
 });
 
@@ -128,11 +130,27 @@ describe("time.fromMillis", () => {
   it("handles positive values", () => {
     expect(time.fromMillis(1)).toEqual({ sec: 0, nsec: 1000000 });
     expect(time.fromMillis(1000)).toEqual({ sec: 1, nsec: 0 });
+    expect(time.fromMillis(2000000000005)).toEqual({ sec: 2000000000, nsec: 5000000 });
   });
 
   it("handles negative values", () => {
     expect(time.fromMillis(-1)).toEqual({ sec: -0, nsec: -1000000 });
     expect(time.fromMillis(-1000)).toEqual({ sec: -1, nsec: 0 });
+  });
+});
+
+describe("time.fromMicros", () => {
+  it("handles positive values", () => {
+    expect(time.fromMicros(1)).toEqual({ sec: 0, nsec: 1000 });
+    expect(time.fromMicros(1000)).toEqual({ sec: 0, nsec: 1000000 });
+    expect(time.fromMicros(1000000)).toEqual({ sec: 1, nsec: 0 });
+    expect(time.fromMicros(2000000000000005)).toEqual({ sec: 2000000000, nsec: 5000 });
+  });
+
+  it("handles negative values", () => {
+    expect(time.fromMicros(-1)).toEqual({ sec: -0, nsec: -1000 });
+    expect(time.fromMicros(-1000)).toEqual({ sec: -0, nsec: -1000000 });
+    expect(time.fromMicros(-1000000)).toEqual({ sec: -1, nsec: 0 });
   });
 });
 

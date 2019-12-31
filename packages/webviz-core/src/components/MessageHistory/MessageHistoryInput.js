@@ -1,6 +1,6 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
@@ -11,7 +11,7 @@ import cx from "classnames";
 import * as React from "react";
 
 import type { MessageHistoryTimestampMethod } from ".";
-import type { RosPath } from "./internalCommon";
+import type { RosPath, RosPrimitive } from "./internalCommon";
 import styles from "./MessageHistoryInput.module.scss";
 import {
   type StructureTraversalResult,
@@ -23,14 +23,14 @@ import {
 import parseRosPath from "./parseRosPath";
 import Autocomplete from "webviz-core/src/components/Autocomplete";
 import Dropdown from "webviz-core/src/components/Dropdown";
-import GlobalVariablesAccessor from "webviz-core/src/components/GlobalVariablesAccessor";
 import Icon from "webviz-core/src/components/Icon";
 import { TOPICS_WITH_INCORRECT_HEADERS } from "webviz-core/src/components/MessageHistory/internalCommon";
-import { MessagePipelineConsumer, type MessagePipelineContext } from "webviz-core/src/components/MessagePipeline";
 import Tooltip from "webviz-core/src/components/Tooltip";
-import { getTopicNames } from "webviz-core/src/selectors";
-import type { Topic } from "webviz-core/src/types/players";
+import useGlobalVariables, { type GlobalVariables } from "webviz-core/src/hooks/useGlobalVariables";
+import * as PanelAPI from "webviz-core/src/PanelAPI";
+import type { Topic } from "webviz-core/src/players/types";
 import type { RosDatatypes } from "webviz-core/src/types/RosDatatypes";
+import { getTopicNames } from "webviz-core/src/util/selectors";
 
 function topicHasNoHeaderStamp(topic: Topic, datatypes: RosDatatypes): boolean {
   const structureTraversalResult = traverseStructure(messagePathStructures(datatypes)[topic.datatype], [
@@ -47,18 +47,52 @@ function topicHasNoHeaderStamp(topic: Topic, datatypes: RosDatatypes): boolean {
 
 function getFirstInvalidVariableFromRosPath(
   rosPath: RosPath,
-  globalData: Object
+  globalVariables: GlobalVariables
 ): ?{| variableName: string, loc: number |} {
   const { messagePath } = rosPath;
   return messagePath
-    .map((path) =>
-      path.type === "filter" &&
-      typeof path.value === "object" &&
-      !Object.keys(globalData).includes(path.value.variableName)
-        ? { variableName: path.value.variableName, loc: path.valueLoc }
-        : undefined
-    )
+    .map((path) => {
+      const globalVars = Object.keys(globalVariables);
+      if (path.type === "filter" && typeof path.value === "object" && !globalVars.includes(path.value.variableName)) {
+        return { variableName: path.value.variableName, loc: path.valueLoc };
+      }
+
+      if (path.type === "slice" && typeof path.start === "object" && !globalVars.includes(path.start.variableName)) {
+        return { variableName: path.start.variableName, loc: path.start.startLoc };
+      }
+
+      if (path.type === "slice" && typeof path.end === "object" && !globalVars.includes(path.end.variableName)) {
+        return { variableName: path.end.variableName, loc: path.end.startLoc };
+      }
+      return undefined;
+    })
     .find(Boolean);
+}
+
+function getExamplePrimitive(primitiveType: RosPrimitive) {
+  switch (primitiveType) {
+    case "string":
+      return '""';
+    case "bool":
+      return "true";
+    case "float32":
+    case "float64":
+    case "uint8":
+    case "uint16":
+    case "uint32":
+    case "uint64":
+    case "int8":
+    case "int16":
+    case "int32":
+    case "int64":
+      return "0";
+    case "duration":
+    case "time":
+      return "";
+    default:
+      (primitiveType: empty);
+      return "";
+  }
 }
 
 type MessageHistoryInputBaseProps = {
@@ -69,18 +103,19 @@ type MessageHistoryInputBaseProps = {
   noMultiSlices?: boolean, // Don't suggest slices with multiple values `[:]`, only single values like `[0]`.
   autoSize?: boolean,
   placeholder?: string,
-  inputStyle?: Object,
+  inputStyle?: any,
+  disableAutocomplete?: boolean, // Treat this as a normal input, with no autocomplete.
 
   timestampMethod?: MessageHistoryTimestampMethod,
   onTimestampMethodChange?: (MessageHistoryTimestampMethod, index: ?number) => void,
 };
 type MessageHistoryInputProps = MessageHistoryInputBaseProps & {
-  topics: Topic[],
+  topics: $ReadOnlyArray<Topic>,
   datatypes: RosDatatypes,
-  globalData: Object,
+  globalVariables: GlobalVariables,
 };
 type MessageHistoryInputState = {| focused: boolean |};
-class MessageHistoryInput extends React.PureComponent<MessageHistoryInputProps, MessageHistoryInputState> {
+class MessageHistoryInputUnconnected extends React.PureComponent<MessageHistoryInputProps, MessageHistoryInputState> {
   _input: ?HTMLInputElement;
 
   constructor(props: MessageHistoryInputProps) {
@@ -120,7 +155,7 @@ class MessageHistoryInput extends React.PureComponent<MessageHistoryInputProps, 
   _onSelect = (
     value: string,
     autocomplete: Autocomplete,
-    autocompleteType: ?("topicName" | "messagePath" | "globalData"),
+    autocompleteType: ?("topicName" | "messagePath" | "globalVariables"),
     autocompleteRange: {| start: number, end: number |}
   ) => {
     // If we're dealing with a topic name, and we cannot validly end in a message type,
@@ -157,11 +192,12 @@ class MessageHistoryInput extends React.PureComponent<MessageHistoryInputProps, 
       noMultiSlices,
       timestampMethod,
       inputStyle,
-      globalData,
+      disableAutocomplete,
+      globalVariables,
     } = this.props;
 
     const rosPath = parseRosPath(path);
-    let autocompleteType: ?("topicName" | "messagePath" | "globalData");
+    let autocompleteType: ?("topicName" | "messagePath" | "globalVariables");
     let topic: ?Topic;
     let structureTraversalResult: ?StructureTraversalResult;
     if (rosPath) {
@@ -191,10 +227,12 @@ class MessageHistoryInput extends React.PureComponent<MessageHistoryInputProps, 
     let autocompleteItems = [];
     let autocompleteFilterText = "";
     let autocompleteRange = { start: 0, end: Infinity };
-    if (autocompleteType === "topicName") {
+    if (disableAutocomplete) {
+      autocompleteItems = [];
+    } else if (autocompleteType === "topicName") {
       autocompleteItems = getTopicNames(topics);
       autocompleteFilterText = path;
-    } else if (autocompleteType === "messagePath" && topic) {
+    } else if (autocompleteType === "messagePath" && topic /*:: && rosPath */) {
       if (
         structureTraversalResult &&
         !structureTraversalResult.valid &&
@@ -203,18 +241,41 @@ class MessageHistoryInput extends React.PureComponent<MessageHistoryInputProps, 
         structureTraversalResult.structureItem &&
         structureTraversalResult.structureItem.structureType === "message"
       ) {
-        autocompleteItems = Object.keys(structureTraversalResult.structureItem.nextByName);
-        autocompleteFilterText = structureTraversalResult.msgPathPart.name;
+        const { msgPathPart } = structureTraversalResult;
+
+        // Provide filter suggestions for primitive values, since they're the only kinds of values
+        // that can be filtered on.
+        // TODO: add support for nested paths to primitives, such as "/some_topic{foo.bar==3}".
+        for (const name of Object.keys(structureTraversalResult.structureItem.nextByName)) {
+          const item = structureTraversalResult.structureItem.nextByName[name];
+          if (item.structureType === "primitive") {
+            autocompleteItems.push(`${name}==${getExamplePrimitive(item.primitiveType)}`);
+          }
+        }
+
+        autocompleteFilterText = msgPathPart.path.join(".");
         autocompleteRange = {
-          start: structureTraversalResult.msgPathPart.nameLoc,
-          end: structureTraversalResult.msgPathPart.nameLoc + structureTraversalResult.msgPathPart.name.length,
+          start: msgPathPart.nameLoc,
+          end: msgPathPart.nameLoc + autocompleteFilterText.length,
         };
       } else {
         autocompleteItems = messagePathsForDatatype(topic.datatype, datatypes, validTypes, noMultiSlices).filter(
           // .header.seq is pretty useless but shows up everryyywhere.
           (msgPath) => msgPath !== "" && !msgPath.endsWith(".header.seq")
         );
-        autocompleteRange = { start: topic.name.length, end: Infinity };
+
+        // Exclude any initial filters ("/topic{foo=='bar'}") from the range that will be replaced
+        // when the user chooses a new message path.
+        let initialFilterLength = 0;
+        for (const item of rosPath.messagePath) {
+          if (item.type === "filter") {
+            initialFilterLength += item.repr.length + 2; // add { and }
+          } else {
+            break;
+          }
+        }
+
+        autocompleteRange = { start: topic.name.length + initialFilterLength, end: Infinity };
         // Filter out filters (hah!) in a pretty crude way, so autocomplete still works
         // when already having specified a filter and you want to see what other object
         // names you can complete it with. Kind of an edge case, and this doesn't work
@@ -223,23 +284,23 @@ class MessageHistoryInput extends React.PureComponent<MessageHistoryInputProps, 
         autocompleteFilterText = path.substr(topic.name.length).replace(/\{[^}]*\}/g, "");
       }
     } else if (rosPath) {
-      const invalidGlobalDataVariable = getFirstInvalidVariableFromRosPath(rosPath, globalData);
+      const invalidGlobalVariablesVariable = getFirstInvalidVariableFromRosPath(rosPath, globalVariables);
 
-      if (invalidGlobalDataVariable) {
-        autocompleteType = "globalData";
-        autocompleteItems = Object.keys(globalData).map((key) => `$${key}`);
+      if (invalidGlobalVariablesVariable) {
+        autocompleteType = "globalVariables";
+        autocompleteItems = Object.keys(globalVariables).map((key) => `$${key}`);
         autocompleteRange = {
-          start: invalidGlobalDataVariable.loc,
-          end: invalidGlobalDataVariable.loc + invalidGlobalDataVariable.variableName.length + 1,
+          start: invalidGlobalVariablesVariable.loc,
+          end: invalidGlobalVariablesVariable.loc + invalidGlobalVariablesVariable.variableName.length + 1,
         };
-        autocompleteFilterText = invalidGlobalDataVariable.variableName;
+        autocompleteFilterText = invalidGlobalVariablesVariable.variableName;
       }
     }
 
     const noHeaderStamp = topic && topicHasNoHeaderStamp(topic, datatypes);
 
     return (
-      <div style={{ display: "flex", flex: "1 1 auto", minWidth: 0 }}>
+      <div style={{ display: "flex", flex: "1 1 auto", minWidth: 0, justifyContent: "space-between" }}>
         <Autocomplete
           items={autocompleteItems}
           filterText={autocompleteFilterText}
@@ -248,7 +309,7 @@ class MessageHistoryInput extends React.PureComponent<MessageHistoryInputProps, 
           onSelect={(value: string, item: any, autocomplete: Autocomplete) =>
             this._onSelect(value, autocomplete, autocompleteType, autocompleteRange)
           }
-          hasError={!!autocompleteType}
+          hasError={!!autocompleteType && !disableAutocomplete}
           autocompleteKey={autocompleteType}
           placeholder={placeholder || "/some/topic.msgs[0].field"}
           autoSize={autoSize}
@@ -261,7 +322,7 @@ class MessageHistoryInput extends React.PureComponent<MessageHistoryInputProps, 
               onChange={this._onTimestampMethodChange}
               value={timestampMethod}
               toggleComponent={
-                <Tooltip contents="Timestamp used for x-axis" placement="right">
+                <Tooltip contents="Timestamp used for x-axis" placement="top">
                   <div
                     className={cx({
                       [styles.timestampMethodDropdown]: true,
@@ -309,23 +370,17 @@ class MessageHistoryInput extends React.PureComponent<MessageHistoryInputProps, 
   }
 }
 
-export default class MessageHistoryInputConnected extends React.PureComponent<MessageHistoryInputBaseProps> {
-  render(): React.Node {
-    return (
-      <GlobalVariablesAccessor>
-        {(globalData, _) => (
-          <MessagePipelineConsumer>
-            {(context: MessagePipelineContext) => (
-              <MessageHistoryInput
-                {...this.props}
-                topics={context.sortedTopics}
-                datatypes={context.datatypes}
-                globalData={globalData}
-              />
-            )}
-          </MessagePipelineConsumer>
-        )}
-      </GlobalVariablesAccessor>
-    );
-  }
-}
+export default React.memo<MessageHistoryInputBaseProps>(function MessageHistoryInput(
+  props: MessageHistoryInputBaseProps
+) {
+  const { globalVariables } = useGlobalVariables();
+  const { datatypes, topics } = PanelAPI.useDataSourceInfo();
+  return (
+    <MessageHistoryInputUnconnected
+      {...props}
+      topics={topics}
+      datatypes={datatypes}
+      globalVariables={globalVariables}
+    />
+  );
+});

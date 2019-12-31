@@ -1,4 +1,4 @@
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
@@ -7,13 +7,7 @@
 @import "./reset.scss";
 @import "./colors.module.scss";
 @import "./mixins.module.scss";
-
-@font-face {
-  font-family: "Inter UI";
-  src: url("~inter-ui/Inter UI (web)/Inter-UI.var.woff2") format("woff2-variations");
-  font-weight: 400 900;
-  font-style: oblique 0deg 10deg;
-}
+@import "./fonts.module.scss";
 
 /* globally apply flex to containers outside our component hierarchy */
 /* this ensures the app container elements stretch edge to edge and do not scroll */
@@ -169,7 +163,9 @@ hr {
 }
 
 button {
-  cursor: pointer;
+  &:not(.disabled):not([disabled]) {
+    cursor: pointer;
+  }
   text-align: center;
 
   &.is-danger {
@@ -194,6 +190,9 @@ button {
   &.disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+  &.is-small {
+    padding: 4px 8px;
   }
 }
 

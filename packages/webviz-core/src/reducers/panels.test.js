@@ -1,28 +1,31 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
 //  You may not use this file except in compliance with the License.
 
-import createHistory from "history/createMemoryHistory";
+import { createMemoryHistory } from "history";
 import { getLeaves } from "react-mosaic-component";
 
-import { changePanelLayout, savePanelConfig, importPanelLayout } from "webviz-core/src/actions/panels";
-import rootReducer from "webviz-core/src/reducers";
-import { LAYOUT_KEY, PANEL_PROPS_KEY, GLOBAL_DATA_KEY } from "webviz-core/src/reducers/panels";
+import { changePanelLayout, savePanelConfig, importPanelLayout, setUserNodes } from "webviz-core/src/actions/panels";
+import { getGlobalHooks } from "webviz-core/src/loadWebviz";
+import createRootReducer from "webviz-core/src/reducers";
+import { GLOBAL_STATE_STORAGE_KEY } from "webviz-core/src/reducers/panels";
 import configureStore from "webviz-core/src/store";
 import Storage from "webviz-core/src/util/Storage";
 
 const getStore = () => {
-  const history = createHistory();
-  const store = configureStore(rootReducer, [], history);
-  store.checkState = (fn) => fn(store.getState().panels, store.getState().routing);
+  const history = createMemoryHistory();
+  const store = configureStore(createRootReducer(history), [], history);
+  store.checkState = (fn) => fn(store.getState().panels, store.getState().router);
   // attach a helper method to the test store
   store.push = (path) => history.push(path);
   return store;
 };
+
+const defaultGlobalState = getGlobalHooks().getDefaultGlobalStates();
 
 describe("state.panels", () => {
   beforeEach(() => {
@@ -33,21 +36,18 @@ describe("state.panels", () => {
     const store = getStore();
     store.checkState((panels) => {
       const storage = new Storage();
-      expect(storage.get(LAYOUT_KEY)).toEqual(panels.layout);
+      const globalState = storage.get(GLOBAL_STATE_STORAGE_KEY) || {};
+      expect(globalState.layout).toEqual(panels.layout);
     });
   });
 
-  it("stores default settings in local storage when layout payload is empty", () => {
+  it("stores default settings in local storage", () => {
     const store = getStore();
-    const emptyPayload = {};
-
-    store.dispatch(importPanelLayout(emptyPayload, false));
     store.checkState((panels) => {
-      expect(panels.layout.slice(0, 7)).toEqual("RosOut!");
+      expect(panels.layout).toEqual(defaultGlobalState.layout);
       expect(panels.savedProps).toEqual({});
       const storage = new Storage();
-      expect((storage.get(LAYOUT_KEY) || "").slice(0, 7)).toEqual("RosOut!");
-      expect(storage.get(PANEL_PROPS_KEY)).toEqual({});
+      expect(storage.get(GLOBAL_STATE_STORAGE_KEY)).toEqual(defaultGlobalState);
     });
   });
 
@@ -64,13 +64,14 @@ describe("state.panels", () => {
       expect(panels.savedProps).toEqual({});
     });
 
-    store.dispatch(importPanelLayout(payload, false));
+    store.dispatch(importPanelLayout(payload));
     store.checkState((panels) => {
       expect(panels.layout).toEqual("foo!bar");
       expect(panels.savedProps).toEqual({ foo: { test: true } });
       const storage = new Storage();
-      expect(storage.get(LAYOUT_KEY)).toEqual(panels.layout);
-      expect(storage.get(PANEL_PROPS_KEY)).toEqual(panels.savedProps);
+      const globalState = storage.get(GLOBAL_STATE_STORAGE_KEY) || {};
+      expect(globalState.layout).toEqual(panels.layout);
+      expect(globalState.savedProps).toEqual(panels.savedProps);
     });
 
     store.dispatch(changePanelLayout("foo"));
@@ -78,47 +79,98 @@ describe("state.panels", () => {
       expect(panels.layout).toEqual("foo");
       expect(panels.savedProps).toEqual({ foo: { test: true } });
       const storage = new Storage();
-      expect(storage.get(LAYOUT_KEY)).toEqual(panels.layout);
-      expect(storage.get(PANEL_PROPS_KEY)).toEqual(panels.savedProps);
+      const globalState = storage.get(GLOBAL_STATE_STORAGE_KEY) || {};
+      expect(globalState.layout).toEqual(panels.layout);
+      expect(globalState.savedProps).toEqual(panels.savedProps);
     });
 
-    store.dispatch(savePanelConfig({ id: "foo", config: { testing: true } }));
+    store.dispatch(savePanelConfig({ id: "foo", config: { testing: true }, defaultConfig: { testing: false } }));
     store.checkState((panels) => {
       expect(panels.layout).toEqual("foo");
       expect(panels.savedProps).toEqual({ foo: { test: true, testing: true } });
       const storage = new Storage();
-      expect(storage.get(LAYOUT_KEY)).toEqual(panels.layout);
-      expect(storage.get(PANEL_PROPS_KEY)).toEqual(panels.savedProps);
+      const globalState = storage.get(GLOBAL_STATE_STORAGE_KEY) || {};
+      expect(globalState.layout).toEqual(panels.layout);
+      expect(globalState.savedProps).toEqual(panels.savedProps);
     });
   });
 
-  it("sets default globalData value in local storage if globalData is not in migrated payload", () => {
+  it("sets default globalVariables, linkedGlobalVariables, userNodes in local storage if values are not in migrated payload", () => {
     const store = getStore();
     const payload = {
       layout: "foo!baz",
       savedProps: { foo: { test: true } },
     };
 
-    store.dispatch(importPanelLayout(payload, false));
+    store.dispatch(importPanelLayout(payload));
     store.checkState((panels) => {
       const storage = new Storage();
-      expect(storage.get(GLOBAL_DATA_KEY)).toEqual({});
+      const globalState = storage.get(GLOBAL_STATE_STORAGE_KEY) || {};
+      expect(globalState.globalVariables).toEqual({});
+      expect(globalState.userNodes).toEqual({});
+      expect(globalState.linkedGlobalVariables).toEqual([]);
     });
   });
 
-  it("sets globalData value in local storage", () => {
+  it("sets default speed in local storage if playbackConfig object is not in migrated payload", () => {
     const store = getStore();
-    const globalData = { some_global_data_var: 1 };
     const payload = {
       layout: "foo!baz",
       savedProps: { foo: { test: true } },
-      globalData,
     };
 
-    store.dispatch(importPanelLayout(payload, false));
+    store.dispatch(importPanelLayout(payload));
     store.checkState((panels) => {
       const storage = new Storage();
-      expect(storage.get(GLOBAL_DATA_KEY)).toEqual(globalData);
+      const globalState = storage.get(GLOBAL_STATE_STORAGE_KEY) || {};
+      expect(globalState.playbackConfig).toEqual({ speed: 0.2 });
+    });
+  });
+
+  it("sets globalVariables, userNodes, linkedGlobalVariables in local storage", () => {
+    const store = getStore();
+    const globalVariables = { some_global_data_var: 1 };
+    const linkedGlobalVariables = [{ topic: "/foo", markerKeyPath: ["bar", "1"], name: "someVariableName" }];
+    const userNodes = { foo: { name: "foo", sourceCode: "foo node" } };
+    const payload = {
+      layout: "foo!baz",
+      savedProps: { foo: { test: true } },
+      globalVariables,
+      userNodes,
+      linkedGlobalVariables,
+    };
+
+    store.dispatch(importPanelLayout(payload));
+    store.checkState((panels) => {
+      const storage = new Storage();
+      const globalState = storage.get(GLOBAL_STATE_STORAGE_KEY) || {};
+      expect(globalState.globalVariables).toEqual(globalVariables);
+      expect(globalState.userNodes).toEqual(userNodes);
+      expect(globalState.linkedGlobalVariables).toEqual(linkedGlobalVariables);
+    });
+  });
+
+  it("change globalData key to globalVariables if only globalData key is present", () => {
+    const store = getStore();
+    const globalVariables = { some_global_data_var: 1 };
+    const payload = { globalData: globalVariables, layout: "foo!baz" };
+    store.dispatch(importPanelLayout(payload, { isFromUrl: true }));
+    store.checkState((panels) => {
+      const storage = new Storage();
+      const globalState = storage.get(GLOBAL_STATE_STORAGE_KEY) || {};
+      expect(globalState.globalVariables).toEqual(globalVariables);
+    });
+  });
+
+  it("delete globalData key if both globalVariables and globalData are present", () => {
+    const store = getStore();
+    const globalVariables = { some_global_data_var: 1 };
+    const payload = { globalData: { some_var: 2 }, globalVariables, layout: "foo!baz" };
+    store.dispatch(importPanelLayout(payload, { isFromUrl: true }));
+    store.checkState((panels) => {
+      const storage = new Storage();
+      const globalState = storage.get(GLOBAL_STATE_STORAGE_KEY) || {};
+      expect(globalState.globalData).toBe(undefined);
     });
   });
 
@@ -149,7 +201,7 @@ describe("state.panels", () => {
   };
 
   testUrlCleanup("removes layout when config changes", () => {
-    return savePanelConfig({ id: "bar", config: { baz: true } });
+    return savePanelConfig({ id: "bar", config: { baz: true }, defaultConfig: {} });
   });
 
   testUrlCleanup("removes layout when layout changes", () => {
@@ -157,7 +209,7 @@ describe("state.panels", () => {
   });
 
   testUrlCleanup("removes layout when layout is imported", () => {
-    return importPanelLayout({ layout: "foo!bar", savedProps: {} }, false);
+    return importPanelLayout({ layout: "foo!bar", savedProps: {} });
   });
 
   it("does not remove layout if layout is imported from url", () => {
@@ -166,7 +218,7 @@ describe("state.panels", () => {
     store.checkState((panels, routing) => {
       expect(routing.location.search).toEqual("?layout=foo&name=bar");
     });
-    store.dispatch(importPanelLayout({ layout: null, savedProps: {} }, true));
+    store.dispatch(importPanelLayout({ layout: null, savedProps: {} }, { isFromUrl: true }));
     store.checkState((panels, routing) => {
       expect(routing.location.search).toEqual("?layout=foo&name=bar");
     });
@@ -176,9 +228,10 @@ describe("state.panels", () => {
     const store = getStore();
     const storage = new Storage();
 
-    store.dispatch(importPanelLayout({ layout: "myNewLayout", savedProps: {} }, true));
+    store.dispatch(importPanelLayout({ layout: "myNewLayout", savedProps: {} }, { isFromUrl: true }));
     store.checkState((panels) => {
-      expect(storage.get(LAYOUT_KEY)).toEqual("myNewLayout");
+      const globalState = storage.get(GLOBAL_STATE_STORAGE_KEY) || {};
+      expect(globalState.layout).toEqual("myNewLayout");
     });
   });
 
@@ -186,9 +239,12 @@ describe("state.panels", () => {
     const store = getStore();
     const storage = new Storage();
 
-    store.dispatch(importPanelLayout({ layout: null, savedProps: {} }, true, true));
+    store.dispatch(
+      importPanelLayout({ layout: null, savedProps: {} }, { isFromUrl: true, skipSettingLocalStorage: true })
+    );
     store.checkState((panels) => {
-      expect(storage.get(LAYOUT_KEY)).not.toEqual(panels.layout);
+      const globalState = storage.get(GLOBAL_STATE_STORAGE_KEY) || {};
+      expect(globalState.layout).not.toEqual(panels.layout);
     });
   });
 
@@ -204,10 +260,27 @@ describe("state.panels", () => {
         id: "foo",
         silent: true,
         config: { bar: true },
+        defaultConfig: { bar: false },
       })
     );
     store.checkState((panels, routing) => {
       expect(routing.location.search).toEqual("?layout=foo&name=bar");
+    });
+  });
+
+  it("saves and overwrites Webviz nodes", () => {
+    const store = getStore();
+    const firstPayload = { foo: { name: "foo", sourceCode: "bar" } };
+    const secondPayload = { bar: { name: "bar", sourceCode: "baz" } };
+
+    store.dispatch(setUserNodes(firstPayload));
+    store.checkState((panelState) => {
+      expect(panelState.userNodes).toEqual(firstPayload);
+    });
+
+    store.dispatch(setUserNodes(secondPayload));
+    store.checkState((panelState) => {
+      expect(panelState.userNodes).toEqual({ ...firstPayload, ...secondPayload });
     });
   });
 
@@ -239,9 +312,11 @@ describe("state.panels", () => {
         expect(panels.savedProps).toEqual({});
       });
 
-      const panelConfig = { id: "SecondPanel!2wydzut", config: { foo: "bar" } };
+      const panelConfig = { id: "SecondPanel!2wydzut", config: { foo: "bar" }, defaultConfig: { foo: "" } };
       store.dispatch(savePanelConfig(panelConfig));
-      store.dispatch(savePanelConfig({ id: "FirstPanel!34otwwt", config: { baz: true } }));
+      store.dispatch(
+        savePanelConfig({ id: "FirstPanel!34otwwt", config: { baz: true }, defaultConfig: { baz: false } })
+      );
       store.checkState((panels) => {
         expect(panels.savedProps).toEqual({
           "SecondPanel!2wydzut": { foo: "bar" },
@@ -267,7 +342,7 @@ describe("state.panels", () => {
       store.checkState((panels) => {
         expect(panels.savedProps).toEqual({});
       });
-      store.dispatch(savePanelConfig({ id: "foo!1234", config: { okay: true } }));
+      store.dispatch(savePanelConfig({ id: "foo!1234", config: { okay: true }, defaultConfig: { okay: false } }));
       store.checkState((panels) => {
         expect(panels.savedProps).toEqual({
           "foo!1234": { okay: true },

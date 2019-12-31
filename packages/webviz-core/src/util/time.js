@@ -1,14 +1,17 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
 //  You may not use this file except in compliance with the License.
 
+import { isEqual } from "lodash";
 import momentDurationFormatSetup from "moment-duration-format";
 import moment from "moment-timezone";
 import { type Time, TimeUtil } from "rosbag";
+
+import { SEEK_TO_QUERY_KEY } from "webviz-core/src/util/globalConstants";
 
 type BatchTimestamp = {
   seconds: number,
@@ -16,6 +19,13 @@ type BatchTimestamp = {
 };
 
 momentDurationFormatSetup(moment);
+
+// Unfortunately, using %checks on this function doesn't actually allow Flow to conclude that the object is a Time.
+// Related: https://github.com/facebook/flow/issues/3614
+const timeFields = new Set(["sec", "nsec"]);
+export function isTime(obj: mixed): boolean {
+  return !!obj && typeof obj === "object" && isEqual(new Set(Object.getOwnPropertyNames(obj)), timeFields);
+}
 
 export function format(stamp: Time) {
   return `${formatDate(stamp)} ${formatTime(stamp)}`;
@@ -92,6 +102,10 @@ export function toNanoSec({ sec, nsec }: Time) {
   return sec * 1e9 + nsec;
 }
 
+export function toMicroSec({ sec, nsec }: Time) {
+  return (sec * 1e9 + nsec) / 1000;
+}
+
 export function toSec({ sec, nsec }: Time) {
   return sec + nsec * 1e-9;
 }
@@ -111,8 +125,26 @@ export function fromNanoSec(nsec: number): Time {
   return { sec: Math.trunc(nsec / 1e9), nsec: nsec % 1e9 };
 }
 
+export function toMillis(time: Time, roundDirection: "round-up" | "round-down"): number {
+  const secondsMillis = time.sec * 1e3;
+  const nsecMillis = time.nsec / 1e6;
+  return roundDirection === "round-up" ? secondsMillis + Math.ceil(nsecMillis) : secondsMillis + Math.floor(nsecMillis);
+}
+
 export function fromMillis(value: number): Time {
-  return fromSec(value / 1000);
+  let sec = Math.trunc(value / 1000);
+  let nsec = Math.round((value - sec * 1000) * 1e6);
+  sec += Math.trunc(nsec / 1e9);
+  nsec %= 1e9;
+  return { sec, nsec };
+}
+
+export function fromMicros(value: number): Time {
+  let sec = Math.trunc(value / 1e6);
+  let nsec = Math.round((value - sec * 1e6) * 1e3);
+  sec += Math.trunc(nsec / 1e9);
+  nsec %= 1e9;
+  return { sec, nsec };
 }
 
 export function findClosestTimestampIndex(currentTime: Time, frameTimestamps: string[] = []): number {
@@ -210,4 +242,10 @@ export function parseTimeStr(str: string): ?Time {
     return null;
   }
   return result;
+}
+
+export function getSeekToTime(): ?Time {
+  const params = new URLSearchParams(window.location.search);
+  const seekToParam = params.get(SEEK_TO_QUERY_KEY);
+  return seekToParam ? fromMillis(parseInt(seekToParam)) : null;
 }

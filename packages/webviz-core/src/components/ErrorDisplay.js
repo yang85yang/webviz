@@ -1,6 +1,6 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
@@ -17,13 +17,15 @@ import Icon from "webviz-core/src/components/Icon";
 import Menu from "webviz-core/src/components/Menu";
 import Modal, { Title } from "webviz-core/src/components/Modal";
 import renderToBody from "webviz-core/src/components/renderToBody";
+import { getGlobalHooks } from "webviz-core/src/loadWebviz";
 import colors from "webviz-core/src/styles/colors.module.scss";
-import { setErrorHandler } from "webviz-core/src/util/reportError";
+import { colors as RobotStylesColors } from "webviz-core/src/util/colors";
+import { setErrorHandler, unsetErrorHandler, type DetailsType } from "webviz-core/src/util/reportError";
 
 type ErrorMessage = {
   +id: string,
   +message: string,
-  +details: string,
+  +details: DetailsType,
   +read: boolean,
   +created: Date,
 };
@@ -31,8 +33,10 @@ type ErrorMessage = {
 const Container = styled.div`
   height: 100%;
   display: flex;
+  flex: 1 1 auto;
+  justify-content: flex-end;
   align-items: center;
-  padding: 0px 7px;
+  padding: 0px 8px;
   transition: background-color 200ms linear;
   background-color: ${(props) => (props.flash ? colors.red : "")};
   color: ${(props) => (props.flash ? "white" : props.unread ? colors.red : "rgba(255, 255, 255, 0.5)")};
@@ -139,12 +143,22 @@ const ModalBody = styled.div`
 `;
 
 // Exporting for tests.
-export function showErrorModal(errorMessage: ErrorMessage): void {
+export function showErrorModal(error: ErrorMessage): void {
+  const { renderErrorDetails } = getGlobalHooks();
+  let details = renderErrorDetails ? renderErrorDetails(error.details) : error.details;
+  if (details instanceof Error) {
+    details = details.stack;
+  }
+
   const modal = renderToBody(
     <Modal onRequestClose={() => modal.remove()}>
       <ModalBody>
-        <Title style={{ color: colors.red }}>{errorMessage.message}</Title>
-        <pre style={{ whiteSpace: "pre-wrap", lineHeight: 1.3 }}>{errorMessage.details}</pre>
+        <Title style={{ color: colors.red }}>{error.message}</Title>
+        {typeof details === "string" ? (
+          <pre style={{ whiteSpace: "pre-wrap", lineHeight: 1.3 }}>{details}</pre>
+        ) : (
+          details || "No details provided"
+        )}
       </ModalBody>
     </Modal>
   );
@@ -167,10 +181,9 @@ export default class ErrorDisplay extends React.PureComponent<{}, State> {
 
   componentDidMount() {
     setErrorHandler(
-      (message: string, details: string | Error): void => {
+      (message: string, details: DetailsType): void => {
         this.setState((state: State) => {
-          const detailsAsError: string = typeof details !== "string" ? details.stack : details || "No details provided";
-          const newErrors = [{ id: uuid(), created: new Date(), message, details: detailsAsError, read: false }];
+          const newErrors = [{ id: uuid(), created: new Date(), message, details, read: false }];
           // shift errors in to the front of the array and keep a max of 100
           const errors = newErrors.concat(state.errors).slice(0, 100);
           return {
@@ -187,6 +200,10 @@ export default class ErrorDisplay extends React.PureComponent<{}, State> {
         }, FLASH_DURATION_MILLIS);
       }
     );
+  }
+
+  componentWillUnmount() {
+    unsetErrorHandler();
   }
 
   toggleErrorList = () => {
@@ -207,23 +224,26 @@ export default class ErrorDisplay extends React.PureComponent<{}, State> {
     const { errors, showMostRecent, showErrorList } = this.state;
     const unreadCount = errors.reduce((acc, err) => acc + (err.read ? 0 : 1), 0);
     const hasUnread = unreadCount > 0;
-    const iconStyle = showMostRecent ? { color: "#991B30" } : {};
     return (
       <Container flash={showMostRecent} unread={hasUnread}>
-        {/* push everything to the right */}
-        <div style={{ flex: "1 1 auto" }} />
         {!!errors.length && (
           <ChildToggle position="below" isOpen={showErrorList} onToggle={this.toggleErrorList}>
-            <div>
-              <Fader visible={showMostRecent} style={{ paddingRight: 10 }}>
-                {errors[0].message}
-              </Fader>
-              <span style={iconStyle}>
+            <div style={{ display: "flex", flex: "1 1 auto", alignItems: "center" }}>
+              <div
+                style={{
+                  display: "flex",
+                  flex: "none",
+                  alignItems: "center",
+                  color: showMostRecent && RobotStylesColors.RED1,
+                }}>
                 <Fader visible={hasUnread}>{unreadCount || ""}</Fader>
                 <Icon small tooltip="Errors">
                   <BellIcon />
                 </Icon>
-              </span>
+              </div>
+              <Fader visible={showMostRecent} style={{ paddingLeft: 5, cursor: "pointer" }}>
+                {errors[0].message}
+              </Fader>
             </div>
             <ErrorList errors={errors} onClick={showErrorModal} />
           </ChildToggle>

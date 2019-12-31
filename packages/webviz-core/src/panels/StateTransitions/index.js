@@ -1,6 +1,6 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
@@ -9,6 +9,7 @@
 import _ from "lodash";
 import * as React from "react";
 import Dimensions from "react-container-dimensions";
+import { hot } from "react-hot-loader/root";
 import stringHash from "string-hash";
 import styled from "styled-components";
 import textWidth from "text-width";
@@ -18,6 +19,7 @@ import helpContent from "./index.help.md";
 import labelVisibilityMap from "./labelVisibilityMap";
 import Button from "webviz-core/src/components/Button";
 import MessageHistory, {
+  MessageHistoryInput,
   type MessageHistoryData,
   type MessageHistoryItem,
   type MessageHistoryTimestampMethod,
@@ -29,6 +31,7 @@ import TimeBasedChart, { type TimeBasedChartTooltipData } from "webviz-core/src/
 import { getGlobalHooks } from "webviz-core/src/loadWebviz";
 import colors from "webviz-core/src/styles/colors.module.scss";
 import mixins from "webviz-core/src/styles/mixins.module.scss";
+import { positiveModulo } from "webviz-core/src/util";
 import { darkColor, lineColors } from "webviz-core/src/util/plotColors";
 import { subtractTimes, toSec } from "webviz-core/src/util/time";
 import { grey } from "webviz-core/src/util/toolsColorScheme";
@@ -62,8 +65,8 @@ const SRoot = styled.div`
 
 const SAddButton = styled.div`
   position: absolute;
-  top: 0;
-  right: 65px;
+  top: 30px;
+  right: 5px;
   opacity: 0;
   transition: opacity 0.1s ease-in-out;
   z-index: 1;
@@ -274,7 +277,7 @@ class StateTransitions extends React.PureComponent<Props> {
                   }
 
                   const valueForColor = typeof value === "string" ? stringHash(value) : Math.round(Number(value));
-                  const color = baseColors[valueForColor % Object.values(baseColors).length];
+                  const color = baseColors[positiveModulo(valueForColor, Object.values(baseColors).length)];
                   dataItem.pointBackgroundColor.push(darkColor(color));
                   dataItem.colors.push(color);
                   dataItem.datalabels.display.push(previousValue === undefined || previousValue !== value);
@@ -326,7 +329,7 @@ class StateTransitions extends React.PureComponent<Props> {
                             }}>
                             ✕
                           </SInputDelete>
-                          <MessageHistory.Input
+                          <MessageHistoryInput
                             path={path}
                             onChange={this._onInputChange}
                             index={index}
@@ -350,4 +353,4 @@ class StateTransitions extends React.PureComponent<Props> {
   }
 }
 
-export default Panel<StateTransitionConfig>(StateTransitions);
+export default hot(Panel<StateTransitionConfig>(StateTransitions));

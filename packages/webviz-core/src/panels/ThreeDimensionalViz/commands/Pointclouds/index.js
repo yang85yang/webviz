@@ -1,14 +1,23 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
 //  You may not use this file except in compliance with the License.
 
-import { makeCommand, withPose, type Regl } from "regl-worldview";
+import * as React from "react";
+import {
+  Command,
+  withPose,
+  type Regl,
+  type CommonCommandProps,
+  type AssignNextColorsFn,
+  type MouseEventObject,
+} from "regl-worldview";
 
-import { mapMarker } from "webviz-core/src/panels/ThreeDimensionalViz/commands/Pointclouds/PointCloudBuilder";
+import filterMap from "webviz-core/src/filterMap";
+import { memoizedMapMarker } from "webviz-core/src/panels/ThreeDimensionalViz/commands/Pointclouds/PointCloudBuilder";
 import { type PointCloud } from "webviz-core/src/types/Messages";
 
 const pointCloud = (regl: Regl) => {
@@ -42,12 +51,10 @@ const pointCloud = (regl: Regl) => {
           vec3 normal;
           normal.xy = gl_PointCoord * 2.0 - 1.0;
           float r2 = dot(normal.xy, normal.xy);
-  
           if (r2 > 1.0) {
             discard;
           }
         }
-        
         gl_FragColor = vec4(fragColor.x / 255.0, fragColor.y / 255.0, fragColor.z / 255.0, 1);
       }
   `,
@@ -58,10 +65,10 @@ const pointCloud = (regl: Regl) => {
 
     uniforms: {
       pointSize: (context, props) => {
-        return props.pointSize || 2;
+        return props.settings?.pointSize || 2;
       },
       isCircle: (context, props) => {
-        return props.pointShape ? props.pointShape === "circle" : true;
+        return props.settings?.pointShape ? props.settings?.pointShape === "circle" : true;
       },
     },
 
@@ -73,19 +80,53 @@ const pointCloud = (regl: Regl) => {
   const command = regl(pointCloudCommand);
 
   return (props: any) => {
-    const arr = Array.isArray(props) ? props : [props];
-
-    const mapped = arr.map((props) => {
-      return props.settings
-        ? mapMarker({
-            ...props,
-            ...props.settings,
-          })
-        : mapMarker(props);
-    });
-
-    command(mapped);
+    command(props);
   };
 };
 
-export default makeCommand<PointCloud>("PointClouds", pointCloud);
+function instancedGetChildrenForHitmap<
+  T: {
+    points: Float32Array,
+    colors: Uint8Array | number[],
+    settings: {
+      pointSize?: number,
+    },
+  }
+>(props: T[], assignNextColors: AssignNextColorsFn, excludedObjects: MouseEventObject[]): T[] {
+  return filterMap(props, (prop) => {
+    // exclude all points if one has been interacted with because iterating through all points in
+    // in pointcloud object is expensive
+    const isInExcludedObjects = excludedObjects.find(({ object }) => object === prop);
+    if (isInExcludedObjects) {
+      return null;
+    }
+    const hitmapProp = { ...prop };
+    const instanceCount = Math.ceil(prop.points.length / 3);
+    if (instanceCount < 1) {
+      return null;
+    }
+    const idColors = assignNextColors(prop, instanceCount);
+    const allColors = [];
+    idColors.forEach((color) => {
+      allColors.push(color[0] * 255);
+      allColors.push(color[1] * 255);
+      allColors.push(color[2] * 255);
+    });
+    hitmapProp.colors = allColors;
+    // expand the interaction area
+    hitmapProp.settings = hitmapProp.settings ? { ...hitmapProp.settings } : {};
+    hitmapProp.settings.pointSize = (hitmapProp.settings.pointSize || 2) * 5;
+    return hitmapProp;
+  });
+}
+
+type Props = { ...CommonCommandProps, children: PointCloud[] };
+
+export default function PointClouds({ children, ...rest }: Props) {
+  const decodedMarkers = children.map(memoizedMapMarker);
+  return (
+    <Command getChildrenForHitmap={instancedGetChildrenForHitmap} {...rest} reglCommand={pointCloud}>
+      {decodedMarkers}
+    </Command>
+  );
+}

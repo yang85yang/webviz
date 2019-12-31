@@ -1,4 +1,4 @@
-#  Copyright (c) 2018-present, GM Cruise LLC
+#  Copyright (c) 2018-present, Cruise LLC
 #
 #  This source code is licensed under the Apache License, Version 2.0,
 #  found in the LICENSE file in the root directory of this source tree.
@@ -22,22 +22,24 @@ main -> topicName messagePath:? modifier:?
 id -> [a-zA-Z0-9_]:+
   {% (d) => d[0].join("") %}
 
-# Positive integer.
-integer -> [0-9]:+
-  {% (d) => parseInt(d[0].join("")) %}
+# Integer.
+integer
+   -> [0-9]:+      {% (d) => ({ value: parseInt(d[0].join("")), repr: d[0].join("") }) %}
+    | "-" [0-9]:+  {% (d) => ({ value: -parseInt(d[1].join("")), repr: `-${d[1].join("")}` }) %}
 
 # String of the form 'hi' or "hi". No escaping supported.
-string -> "'" [^']:* "'"   {% (d) => d[1].join("") %}
-    | "\"" [^"]:* "\"" {% (d) => d[1].join("") %}
+string
+   -> "'" [^']:* "'"   {% (d) => ({ value: d[1].join(""), repr: `'${d[1].join("")}'` }) %}
+    | "\"" [^"]:* "\"" {% (d) => ({ value: d[1].join(""), repr: `"${d[1].join("")}"` }) %}
 
-variable -> "$" id:? {% (d) => (d[1] || "") %}
+variable -> "$" id:? {% (d, loc) => ({ value: {variableName: d[1] || "", startLoc: loc }, repr: `$${d[1] || ""}` }) %}
 
 # An integer, string, or boolean.
 value -> integer  {% (d) => d[0] %}
        | string  {% (d) => d[0] %}
-       | "true"  {% (d) => true %}
-       | "false" {% (d) => false %}
-	   | variable {% (d) => ({variableName: d[0]}) %}
+       | "true"  {% (d) => ({ value: true, repr: "true" }) %}
+       | "false" {% (d) => ({ value: false, repr: "false" }) %}
+	   | variable {% (d) => d[0] %}
 
 ## Topic part. Basically an id but with slashes.
 topicName -> slashID:+
@@ -57,25 +59,49 @@ messagePath -> messagePathElement:* ".":?
 # An element of the `messagePart`, of the form `field[10:20]{some_id==10}`.
 # Multiple slices are not allowed (no 2d arrays in ROS).
 # Return type: `MessagePathPart`.
-messagePathElement -> "." name slice:? filter:?
-  {% (d) => [d[1], d[2], d[3]].filter(x => x !== null) %}
+messagePathElement ->
+  "." name slice:? filter:? {% (d) => [d[1], d[2], d[3]].filter(x => x !== null) %}
+  | filter {% id %}
 
 # Name part is just an id, e.g. `field`.
 name -> id
   {% (d) => ({ type: "name", name: d[0] }) %}
 
 # Slice part; can be a single array index `[0]` or multiple `[0:10]`, or even infinite `[:]`.
-slice -> "[" integer "]"
+sliceVal -> integer {% (d) => (d[0].value) %} | variable {% (d) => (d[0].value) %}
+slice -> "[" sliceVal "]"
             {% (d) => ({ type: "slice", start: d[1], end: d[1] }) %}
-       | "[" integer:? ":" integer:? "]"
-            {% (d) => ({ type: "slice", start: d[1] || 0, end: d[3] === null ? Infinity : d[3] }) %}
+       | "[" sliceVal:? ":" sliceVal:? "]"
+            {% (d) => ({ type: "slice", start: d[1] === null ? 0 : d[1], end: d[3] === null ? Infinity : d[3] }) %}
+
+# For now, filters only support simple "foo.bar.baz" paths, so we need a separate rule for this.
+# TODO: it would be nice if filters supported arbitrary sub-paths, such as "/diagnostics{status[0].hardware_id=='bar'}".
+simplePath -> id ("." id):* {% (d) => [d[0]].concat(d[1].map((d) => d[1])) %}
 
 # Filter part; can be empty `{}` to allow for autocomplete. Can also be half-empty,
 # like `{==0}`, also to allow for autocomplete.
-filter -> "{" id:? "}"
-            {% (d, loc) => ({ type: "filter", name: d[1] || "", value: "", nameLoc: loc+1, valueLoc: loc+1 }) %}
-        | "{" id:? "==" value "}"
-            {% (d, loc) => ({ type: "filter", name: d[1] || "", value: d[3], nameLoc: loc+1, valueLoc: loc+1+(d[1] || '').length+d[2].length }) %}
+filter -> "{" simplePath:? "}"
+            {%
+              (d, loc) => ({
+                type: "filter",
+                path: d[1] || [],
+                value: undefined,
+                nameLoc: loc+1,
+                valueLoc: loc+1,
+                repr: (d[1] || []).join("."),
+              })
+            %}
+        | "{" simplePath:? "==" value "}"
+            {%
+              (d, loc) => ({
+                type: "filter",
+                path: d[1] || [],
+                value: d[3].value,
+                nameLoc: loc+1,
+                valueLoc: loc+1+(d[1] || []).join(".").length+d[2].length,
+                repr: `${(d[1] || []).join(".")}==${d[3].repr}`,
+              })
+            %}
 
 ## Modifier.
 # Optional modifier at the end of a path, e.g. `.@derivative`. Currently only used by the Plot

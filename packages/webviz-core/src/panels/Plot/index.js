@@ -1,23 +1,23 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
 //  You may not use this file except in compliance with the License.
 
-import cx from "classnames";
-import React, { PureComponent } from "react";
+import React, { useEffect, useState, useCallback } from "react";
+import { hot } from "react-hot-loader/root";
 
 import helpContent from "./index.help.md";
-import styles from "./index.module.scss";
 import Flex from "webviz-core/src/components/Flex";
-import Item from "webviz-core/src/components/Menu/Item";
+import MessageHistory, { type MessageHistoryData } from "webviz-core/src/components/MessageHistory";
 import Panel from "webviz-core/src/components/Panel";
 import PanelToolbar from "webviz-core/src/components/PanelToolbar";
 import type { PlotPath } from "webviz-core/src/panels/Plot/internalTypes";
-import PlotChart from "webviz-core/src/panels/Plot/PlotChart";
+import PlotChart, { getDatasets } from "webviz-core/src/panels/Plot/PlotChart";
 import PlotLegend from "webviz-core/src/panels/Plot/PlotLegend";
+import PlotMenu from "webviz-core/src/panels/Plot/PlotMenu";
 
 export const plotableRosTypes = [
   "bool",
@@ -31,12 +31,17 @@ export const plotableRosTypes = [
   "uint64",
   "float32",
   "float64",
+  "time",
+  "duration",
+  "string",
 ];
 
 export type PlotConfig = {
   paths: PlotPath[],
   minYValue: string,
   maxYValue: string,
+  showLegend: boolean,
+  xAxisVal: "timestamp" | "index",
 };
 
 type Props = {
@@ -44,62 +49,72 @@ type Props = {
   saveConfig: ($Shape<PlotConfig>) => void,
 };
 
-function isValidInput(value: string) {
-  return value === "" || !isNaN(parseFloat(value));
-}
+function Plot(props: Props) {
+  const { saveConfig, config } = props;
+  const { paths, minYValue, maxYValue, showLegend, xAxisVal } = config;
+  const [currentMinY, setCurrentMinY] = useState(null);
+  const [currentMaxY, setCurrentMaxY] = useState(null);
 
-class Plot extends PureComponent<Props> {
-  static panelType = "Plot";
-  static defaultConfig = { paths: [], minYValue: "", maxYValue: "" };
+  const saveCurrentYs = useCallback((minY: number, maxY: number) => {
+    setCurrentMinY(maxY);
+    setCurrentMaxY(maxY);
+  }, []);
 
-  _renderMenuContent(minYValue: string, maxYValue: string) {
-    const { saveConfig } = this.props;
+  const setMinMax = useCallback(
+    () =>
+      saveConfig({
+        minYValue: currentMinY ? currentMinY.toString() : "",
+        maxYValue: currentMaxY ? currentMaxY.toString() : "",
+      }),
+    [currentMaxY, currentMinY, saveConfig]
+  );
 
-    return (
-      <>
-        <Item onClick={() => saveConfig({ maxYValue: maxYValue === "" ? "10" : "" })}>
-          <div className={styles.label}>Maximum</div>
-          <input
-            className={cx(styles.input, { [styles.inputError]: !isValidInput(maxYValue) })}
-            value={maxYValue}
-            onChange={(event) => {
-              saveConfig({ maxYValue: event.target.value });
-            }}
-            onClick={(event) => event.stopPropagation()}
-            placeholder="auto"
-          />
-        </Item>
-        <Item onClick={() => saveConfig({ minYValue: minYValue === "" ? "-10" : "" })}>
-          <div className={styles.label}>Minimum</div>
-          <input
-            className={cx(styles.input, { [styles.inputError]: !isValidInput(minYValue) })}
-            value={minYValue}
-            onChange={(event) => {
-              saveConfig({ minYValue: event.target.value });
-            }}
-            onClick={(event) => event.stopPropagation()}
-            placeholder="auto"
-          />
-        </Item>
-      </>
-    );
-  }
-
-  render() {
-    const { minYValue, maxYValue } = this.props.config;
-    let { paths } = this.props.config;
+  useEffect(() => {
     if (!paths.length) {
-      paths = [{ value: "", enabled: true, timestampMethod: "receiveTime" }];
+      saveConfig({ paths: [{ value: "", enabled: true, timestampMethod: "receiveTime" }] });
     }
+  });
 
-    return (
-      <Flex col clip center style={{ position: "relative" }}>
-        <PanelToolbar helpContent={helpContent} floating menuContent={this._renderMenuContent(minYValue, maxYValue)} />
-        <PlotChart paths={paths} minYValue={parseFloat(minYValue)} maxYValue={parseFloat(maxYValue)} />
-        <PlotLegend paths={paths} onChange={this.props.saveConfig} />
-      </Flex>
-    );
-  }
+  return (
+    <Flex col clip center style={{ position: "relative" }}>
+      {/* Don't filter out disabled paths when passing into <MessageHistory>, because we still want
+          easy access to the history when turning the disabled paths back on. */}
+      <MessageHistory paths={paths.map((path) => path.value)} {...(xAxisVal === "index" ? { historySize: 1 } : null)}>
+        {({ itemsByPath, startTime }: MessageHistoryData) => {
+          const datasets = getDatasets(paths, itemsByPath, startTime, xAxisVal);
+          return (
+            <>
+              <PanelToolbar
+                helpContent={helpContent}
+                floating
+                menuContent={
+                  <PlotMenu
+                    minYValue={minYValue}
+                    maxYValue={maxYValue}
+                    saveConfig={saveConfig}
+                    setMinMax={setMinMax}
+                    datasets={datasets}
+                    xAxisVal={xAxisVal}
+                  />
+                }
+              />
+              <PlotChart
+                paths={paths}
+                minYValue={parseFloat(minYValue)}
+                maxYValue={parseFloat(maxYValue)}
+                saveCurrentYs={saveCurrentYs}
+                datasets={datasets}
+                xAxisVal={xAxisVal}
+              />
+            </>
+          );
+        }}
+      </MessageHistory>
+      <PlotLegend paths={paths} saveConfig={saveConfig} showLegend={showLegend} xAxisVal={xAxisVal} />
+    </Flex>
+  );
 }
+Plot.panelType = "Plot";
+Plot.defaultConfig = { paths: [], minYValue: "", maxYValue: "", showLegend: true, xAxisVal: "timestamp" };
 
-export default Panel<PlotConfig>(Plot);
+export default hot(Panel<PlotConfig>(Plot));

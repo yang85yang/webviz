@@ -1,6 +1,6 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
@@ -11,6 +11,7 @@ import { MosaicWithoutDragDropContext, MosaicWindow } from "react-mosaic-compone
 import { connect } from "react-redux";
 import "react-mosaic-component/react-mosaic-component.css";
 
+import ErrorBoundary from "./ErrorBoundary";
 import { type SET_MOSAIC_ID, setMosaicId } from "webviz-core/src/actions/mosaic";
 import { changePanelLayout, savePanelConfig } from "webviz-core/src/actions/panels";
 import type { CHANGE_PANEL_LAYOUT, Dispatcher, SAVE_PANEL_CONFIG } from "webviz-core/src/actions/panels";
@@ -34,10 +35,9 @@ type Props = {
 // so components outside the mosiac component can participate
 class MosaicRoot extends MosaicWithoutDragDropContext {
   componentDidMount() {
-    const { setMosaicId } = this.props;
     // set the mosiac id in redux so elements outside the container
     // can use the id to register their drag intents with mosaic drop targets
-    setMosaicId(this.state.mosaicId);
+    this.props.setMosaicId(this.state.mosaicId);
   }
 }
 
@@ -47,12 +47,16 @@ class PanelLayout extends PureComponent<Props> {
     const type = config ? config.type || defaultPanelType : defaultPanelType;
     const id = getPanelIdForType(type);
     if (config.panelConfig) {
-      this.props.savePanelConfig({ id, config: config.panelConfig });
+      this.props.savePanelConfig({ id, config: config.panelConfig, defaultConfig: {} });
     }
     return id;
   };
 
-  renderTile = (id: string, path: any) => {
+  renderTile = (id: string | {}, path: any) => {
+    // `id` is usually a string. But when `layout` is empty, `id` will be an empty object, in which case we don't need to render Tile
+    if (!id || typeof id !== "string") {
+      return;
+    }
     const type = getPanelTypeFromId(id);
     const PanelComponent = PanelList.getComponentForType(type);
     // if we haven't found a panel of the given type, render the panel selector
@@ -74,21 +78,24 @@ class PanelLayout extends PureComponent<Props> {
   };
 
   render() {
-    const { changePanelLayout, setMosaicId, layout } = this.props;
     return (
-      <MosaicRoot
-        renderTile={this.renderTile}
-        className="none"
-        resize={{ minimumPaneSizePercentage: 10 }}
-        value={layout}
-        onChange={changePanelLayout}
-        setMosaicId={setMosaicId}
-      />
+      <ErrorBoundary>
+        <MosaicRoot
+          renderTile={this.renderTile}
+          className="none"
+          resize={{ minimumPaneSizePercentage: 10 }}
+          value={this.props.layout}
+          onChange={this.props.changePanelLayout}
+          setMosaicId={this.props.setMosaicId}
+        />
+      </ErrorBoundary>
     );
   }
 }
 
 export default connect<Props, {}, _, _, _, _>(
   (state: State) => ({ layout: state.panels.layout }),
-  { changePanelLayout, savePanelConfig, setMosaicId }
+  { changePanelLayout, savePanelConfig, setMosaicId },
+  undefined,
+  { forwardRef: true }
 )(PanelLayout);

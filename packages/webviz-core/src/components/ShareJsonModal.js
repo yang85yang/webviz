@@ -1,11 +1,12 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
 //  You may not use this file except in compliance with the License.
 
+import * as Sentry from "@sentry/browser";
 import cx from "classnames";
 import React, { Component } from "react";
 
@@ -14,7 +15,6 @@ import Button from "webviz-core/src/components/Button";
 import Flex from "webviz-core/src/components/Flex";
 import Modal from "webviz-core/src/components/Modal";
 import clipboard from "webviz-core/src/util/clipboard";
-import sentry from "webviz-core/src/util/sentry";
 
 type Props = {
   onRequestClose: () => void,
@@ -35,7 +35,7 @@ function encode(value: any): string {
   try {
     return JSON.stringify(value, null, 2);
   } catch (e) {
-    sentry.captureException(e, { extra: value });
+    Sentry.captureException(e, { extra: value });
     console.error("Error encoding value", e);
     return "";
   }
@@ -57,10 +57,14 @@ export default class ShareJsonModal extends Component<Props, State> {
   };
 
   onChange = () => {
-    const { onChange } = this.props;
-    const { value } = this.state;
+    const { onChange, onRequestClose } = this.props;
+    let { value } = this.state;
+    if (value.length === 0) {
+      value = JSON.stringify({});
+    }
     try {
-      return onChange(decode(value));
+      onChange(decode(value));
+      onRequestClose();
     } catch (e) {
       if (process.env.NODE_ENV !== "test") {
         console.error("Error parsing value from base64 json", e);
@@ -71,10 +75,10 @@ export default class ShareJsonModal extends Component<Props, State> {
 
   onCopy = () => {
     const { value } = this.state;
-    clipboard.copy(value);
-    this.setState({ copied: true });
-
-    setTimeout(() => this.setState({ copied: false }), 1500);
+    clipboard.copy(value).then(() => {
+      this.setState({ copied: true });
+      setTimeout(() => this.setState({ copied: false }), 1500);
+    });
   };
 
   renderError() {
@@ -107,7 +111,7 @@ export default class ShareJsonModal extends Component<Props, State> {
           />
           {this.renderError()}
           <div className={styles.buttonBar}>
-            <Button primary onClick={this.onChange}>
+            <Button primary onClick={this.onChange} className="test-apply">
               Apply
             </Button>
             <Button onClick={this.onCopy}>{copied ? "Copied!" : "Copy"}</Button>

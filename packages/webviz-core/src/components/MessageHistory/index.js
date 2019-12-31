@@ -1,32 +1,27 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
 //  You may not use this file except in compliance with the License.
 
-import { last } from "lodash";
-import * as React from "react";
-import { createSelector } from "reselect";
+import { last, keyBy } from "lodash";
+import React, { type Node, useCallback, useMemo } from "react";
 import type { Time } from "rosbag";
 
-import addValuesWithPathsToItems from "./addValuesWithPathsToItems";
-import { TOPICS_WITH_INCORRECT_HEADERS } from "./internalCommon";
-import MessageHistoryInput from "./MessageHistoryInput";
+import getMessageHistoryItem from "./getMessageHistoryItem";
+import { useShallowMemo } from "./hooks";
+import { TOPICS_WITH_INCORRECT_HEADERS, type RosPrimitive, type RosPath } from "./internalCommon";
 import MessageHistoryOnlyTopics from "./MessageHistoryOnlyTopics";
 import { messagePathStructures, traverseStructure } from "./messagePathsForDatatype";
 import parseRosPath from "./parseRosPath";
-import topicPathSyntaxHelpContent from "./topicPathSyntax.help.md";
-import GlobalVariablesAccessor from "webviz-core/src/components/GlobalVariablesAccessor";
-import { getFilteredFormattedTopics } from "webviz-core/src/components/MessageHistory/topicPrefixUtils";
-import { MessagePipelineConsumer, type MessagePipelineContext } from "webviz-core/src/components/MessagePipeline";
-import PanelContext from "webviz-core/src/components/PanelContext";
-import { topicsByTopicName, shallowEqualSelector } from "webviz-core/src/selectors";
-import type { Topic, Message } from "webviz-core/src/types/players";
-import type { RosDatatypes } from "webviz-core/src/types/RosDatatypes";
+import filterMap from "webviz-core/src/filterMap";
+import useGlobalVariables from "webviz-core/src/hooks/useGlobalVariables";
+import * as PanelAPI from "webviz-core/src/PanelAPI";
+import type { Message } from "webviz-core/src/players/types";
 
-// Use `<MessageHistory>` to get data from the player, typically a bag or ROS websocked bridge.
+// Use `<MessageHistory>` to get data from the player, typically a bag or ROS websocket bridge.
 // Typical usage looks like this:
 //
 // const path = "/some/topic.some.field";
@@ -54,21 +49,21 @@ import type { RosDatatypes } from "webviz-core/src/types/RosDatatypes";
 //
 // To show an input field with an autocomplete so the user can enter paths themselves, use:
 //
-//  <MessageHistory.Input path={this.state.path} onChange={path => this.setState({ path })} />
+//  <MessageHistoryInput path={this.state.path} onChange={path => this.setState({ path })} />
 //
 // To limit the autocomplete items to only certain types of values, you can use
 //
-//  <MessageHistory.Input types={["message", "array", "primitives"]} />
+//  <MessageHistoryInput types={["message", "array", "primitives"]} />
 //
 // Or use actual ROS primitive types:
 //
-//  <MessageHistory.Input types={["uint16", "float64"]} />
+//  <MessageHistoryInput types={["uint16", "float64"]} />
 //
 // If you don't use timestamps, you might want to hide the warning icon that we show when selecting
-// a topic that has no header: `<MessageHistory.Input hideTimestampWarning>`.
+// a topic that has no header: `<MessageHistoryInput hideTimestampWarning>`.
 //
-// If you are rendering many input fields, you might want to use `<MessageHistory.Input index={5}>`,
-// which gets passed down to `<MessageHistory.Input onChange>` as the second parameter, so you can
+// If you are rendering many input fields, you might want to use `<MessageHistoryInput index={5}>`,
+// which gets passed down to `<MessageHistoryInput onChange>` as the second parameter, so you can
 // avoid creating anonymous functions on every render (which will prevent the component from
 // rendering unnecessarily).
 
@@ -105,7 +100,7 @@ type MessagePathStructureItemArray = {|
 |};
 type MessagePathStructureItemPrimitive = {|
   structureType: "primitive",
-  primitiveType: string,
+  primitiveType: RosPrimitive,
   datatype: string,
 |};
 export type MessagePathStructureItem =
@@ -122,26 +117,15 @@ export type MessageHistoryData = {|
   startTime: Time,
 |};
 
-type Props = {
-  children: (MessageHistoryData) => React.Node,
+type Props = {|
+  children: (MessageHistoryData) => Node,
   paths: string[],
   // Use an object to set a specific history size for specific topics.
   historySize?: number | { [topicName: string]: number },
   // For scaling down images, to spare bandwidth. When using this you should only
   // pass in image topics to `paths`.
   imageScale?: number,
-
-  // By default message history will try to subscribe to topics
-  // even if they don't existing in the player topic's list.
-  // You can disable this behavior for typeahead scenarios or when
-  // you expect user specified topics which are likely to not exist in the player
-  // to prevent a lot of subscribing to non-existant topics.
-  ignoreMissing?: boolean,
-
-  // From player
-  topics: Topic[],
-  datatypes: RosDatatypes,
-};
+|};
 
 export function getLastItem(frame: MessageHistoryItem[]): Message | typeof undefined {
   const lastItem = last(frame);
@@ -169,114 +153,162 @@ export function getTimestampForMessage(message: Message, timestampMethod?: Messa
   return message.receiveTime;
 }
 
-type ChildrenSelectorInput = {
-  messagesByTopic: { [string]: Message[] },
-  cleared: boolean,
-  startTime: Time,
-  paths: string[],
-  topics: Topic[],
-  datatypes: RosDatatypes,
-  globalData: Object,
-};
-
-const getMemoizedChildrenInput = shallowEqualSelector(
-  (input: ChildrenSelectorInput) => input,
-  ({ messagesByTopic, cleared, startTime, paths, topics, datatypes, globalData }: ChildrenSelectorInput) => {
-    const itemsByPath = {};
-    const metadataByPath = {};
-    const structures = messagePathStructures(datatypes);
-
-    for (const path of paths) {
-      itemsByPath[path] = [];
-      metadataByPath[path] = undefined;
-
-      const rosPath = parseRosPath(path);
-      if (rosPath) {
-        itemsByPath[path] = addValuesWithPathsToItems(
-          messagesByTopic[rosPath.topicName],
-          rosPath,
-          topics,
-          datatypes,
-          globalData
-        );
-
-        const topic = topicsByTopicName(topics)[rosPath.topicName];
-        if (topic) {
-          const { structureItem } = traverseStructure(structures[topic.datatype], rosPath.messagePath);
-          if (structureItem) {
-            metadataByPath[path] = { structureItem };
-          }
-        }
-      }
-    }
-    return { itemsByPath, cleared, metadataByPath, startTime };
-  }
-);
-
-const getMemoizedTopics = createSelector(
-  (input: string[]) => input,
-  (paths: string[]) => {
-    return paths
-      .map(parseRosPath)
-      .filter(Boolean)
-      .map(({ topicName }) => topicName);
-  }
-);
-
 // Be sure to pass in a new render function when you want to force a rerender.
 // So you probably don't want to do `<MessageHistory>{this._renderSomething}</MessageHistory>`.
 // This might be a bit counterintuitive but we do this since performance matters here.
-class MessageHistory extends React.PureComponent<Props> {
-  render() {
-    const { children, paths, historySize, topics, datatypes, imageScale, ignoreMissing } = this.props;
+export default React.memo<Props>(function MessageHistory({ children, paths, historySize, imageScale }: Props) {
+  const { globalVariables } = useGlobalVariables();
+  const { datatypes, topics: sortedTopics } = PanelAPI.useDataSourceInfo();
 
-    // Note: parseRosPath is memoized so we don't have to worry about calling it on
-    // every render.
-    return (
-      <GlobalVariablesAccessor>
-        {(globalData) => (
-          <PanelContext.Consumer>
-            {(panelData) => {
-              const topicPrefix = (panelData || {}).topicPrefix || "";
-              return (
-                <MessageHistoryOnlyTopics
-                  topicPrefix={topicPrefix}
-                  panelType={(panelData || {}).type}
-                  ignoreMissing={ignoreMissing}
-                  topics={getMemoizedTopics(paths)}
-                  historySize={historySize || Infinity}
-                  imageScale={imageScale}
-                  key={imageScale /* need to remount when imageScale changes */}>
-                  {(data) =>
-                    children(
-                      getMemoizedChildrenInput({
-                        ...data,
-                        paths,
-                        topics: getFilteredFormattedTopics(topics, topicPrefix),
-                        datatypes,
-                        globalData,
-                      })
-                    )
-                  }
-                </MessageHistoryOnlyTopics>
-              );
-            }}
-          </PanelContext.Consumer>
-        )}
-      </GlobalVariablesAccessor>
-    );
-  }
-}
+  const memoizedTopicsByName = useMemo(() => keyBy(sortedTopics, ({ name }) => name), [sortedTopics]);
 
-export default function MessageHistoryConnected(props: any) {
-  return (
-    <MessagePipelineConsumer>
-      {(context: MessagePipelineContext) => (
-        <MessageHistory {...props} topics={context.sortedTopics} datatypes={context.datatypes} />
-      )}
-    </MessagePipelineConsumer>
+  const structures = messagePathStructures(datatypes);
+
+  const memoizedPaths = useShallowMemo(paths);
+  const [rosPaths, metadataByPath, pathsByTopic, topics] = useMemo(
+    () => {
+      const innerRosPaths: { [string]: ?RosPath } = {};
+      const innerMetadataByPath: { [string]: MessageHistoryMetadata } = {};
+      const innerPathsByTopic: { [string]: { path: string, rosPath: RosPath }[] } = {};
+
+      for (const path of new Set(memoizedPaths)) {
+        const rosPath = parseRosPath(path);
+        innerRosPaths[path] = rosPath;
+        if (rosPath) {
+          innerPathsByTopic[rosPath.topicName] = innerPathsByTopic[rosPath.topicName] || [];
+          innerPathsByTopic[rosPath.topicName].push({ path, rosPath });
+
+          const topic = memoizedTopicsByName[rosPath.topicName];
+          if (topic) {
+            const { structureItem } = traverseStructure(structures[topic.datatype], rosPath.messagePath);
+            if (structureItem) {
+              innerMetadataByPath[path] = { structureItem };
+            }
+          }
+        }
+      }
+      return [innerRosPaths, innerMetadataByPath, innerPathsByTopic, Object.keys(innerPathsByTopic)];
+    },
+    [memoizedPaths, memoizedTopicsByName, structures]
   );
-}
 
-MessageHistoryConnected.Input = MessageHistoryInput;
-MessageHistoryConnected.topicPathSyntaxHelpContent = topicPathSyntaxHelpContent;
+  const memoizedHistorySize = useShallowMemo(historySize);
+
+  // Add a message to all the applicable entries in itemsByPath based on its topic.
+  const addMessage: (MessageHistoryItemsByPath, Message) => MessageHistoryItemsByPath = useCallback(
+    (itemsByPath: MessageHistoryItemsByPath, message: Message) => {
+      const historyLen =
+        memoizedHistorySize && typeof memoizedHistorySize === "object"
+          ? memoizedHistorySize[message.topic]
+          : memoizedHistorySize;
+
+      const pathsMatchingMessage = pathsByTopic[message.topic];
+      if (!pathsMatchingMessage || pathsMatchingMessage.length === 0) {
+        return itemsByPath;
+      }
+
+      let newItemsByPath;
+      for (const { path, rosPath } of pathsMatchingMessage) {
+        const topic = memoizedTopicsByName[rosPath.topicName];
+        if (!topic) {
+          throw new Error(`Missing topic (${rosPath.topicName}) for received message; this should never happen`);
+        }
+        const item = getMessageHistoryItem(message, rosPath, topic, datatypes, globalVariables, structures);
+        if (!item) {
+          continue;
+        }
+
+        if (!newItemsByPath) {
+          newItemsByPath = { ...itemsByPath };
+        }
+        const newItems = newItemsByPath[path].concat(item);
+        if (historyLen != null && Number.isFinite(historyLen) && newItems.length > historyLen) {
+          newItems.splice(0, newItems.length - historyLen);
+        }
+        newItemsByPath[path] = newItems;
+      }
+      return newItemsByPath || itemsByPath;
+    },
+    [datatypes, memoizedTopicsByName, globalVariables, memoizedHistorySize, pathsByTopic, structures]
+  );
+
+  // Create itemsByPath, using prevItemsByPath if items were present for the same topics.
+  const restore = useCallback(
+    (prevItemsByPath: ?MessageHistoryItemsByPath): MessageHistoryItemsByPath => {
+      // Group the previous messages by their topic so we can restore them into new paths for the same topic.
+      const messagesByTopic: { [topic: string]: Message[] } = {};
+      if (prevItemsByPath) {
+        for (const path in prevItemsByPath) {
+          const rosPath = parseRosPath(path);
+          if (rosPath) {
+            // TODO: Keeping only messages from the first path which matches this topic isn't optimal --
+            // some other messages on the same topic might have been available under a different path.
+            // If we cared a lot we could actually merge them from all paths, but this is a good start.
+            if (!messagesByTopic[rosPath.topicName]) {
+              messagesByTopic[rosPath.topicName] = prevItemsByPath[path].map((item) => item.message);
+            }
+          }
+        }
+      }
+
+      const itemsByPath: MessageHistoryItemsByPath = {};
+      for (const path of memoizedPaths) {
+        // If we're just generating initial state, start with an empty array for each path.
+        if (!prevItemsByPath) {
+          itemsByPath[path] = [];
+          continue;
+        }
+
+        const rosPath = rosPaths[path];
+        const { topicName } = rosPath || {};
+        // If we didn't have any messages on this topic (or if the path isn't valid), we can't restore any items.
+        if (!rosPath || !messagesByTopic[topicName]) {
+          itemsByPath[path] = [];
+          continue;
+        }
+        const topic = memoizedTopicsByName[topicName];
+        if (!topic) {
+          itemsByPath[path] = [];
+          continue;
+        }
+
+        // If this path already existed, try to restore the previous items.
+        // (Note that the paths may refer to global variables, so we can't just directly
+        // copy the items over; we must run them through getMessageHistoryItem again.)
+        if (prevItemsByPath[path]) {
+          itemsByPath[path] = filterMap(prevItemsByPath[path], ({ message }) =>
+            getMessageHistoryItem(message, rosPath, topic, datatypes, globalVariables, structures)
+          );
+          continue;
+        }
+
+        // Extract items for this new path from the original messages.
+        itemsByPath[path] = filterMap(messagesByTopic[topicName], (message) =>
+          getMessageHistoryItem(message, rosPath, topic, datatypes, globalVariables, structures)
+        );
+      }
+
+      return itemsByPath;
+    },
+    [datatypes, memoizedTopicsByName, globalVariables, memoizedPaths, rosPaths, structures]
+  );
+
+  const renderChildren = useCallback(
+    ({ reducedValue: itemsByPath, cleared, startTime }) => {
+      return children({ itemsByPath, cleared, metadataByPath, startTime });
+    },
+    [children, metadataByPath]
+  );
+
+  return (
+    <MessageHistoryOnlyTopics
+      topics={imageScale == null ? topics : topics.map((topic) => ({ topic, imageScale }))}
+      restore={restore}
+      addMessage={addMessage}
+      key={imageScale /* need to remount when imageScale changes */}>
+      {renderChildren}
+    </MessageHistoryOnlyTopics>
+  );
+});
+
+export { default as MessageHistoryInput } from "./MessageHistoryInput";
